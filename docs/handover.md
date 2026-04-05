@@ -1,6 +1,6 @@
 # ToneDock — Handover資料
 
-最終更新: 2026-04-06 02:35 JST
+最終更新: 2026-04-06 08:03 JST
 
 ## プロジェクト概要
 
@@ -22,9 +22,10 @@ src/
 ├── audio/
 │   ├── mod.rs
 │   ├── chain.rs          — 従来のプラグインチェーン（後方互換用）
-│   ├── engine.rs         — cpalオーディオエンジン（Chain使用中）
-│   ├── node.rs           — **[新規]** ノード型定義（NodeId, NodeType, Port, etc.）
-│   └── graph.rs          — **[新規]** AudioGraph（DAG処理、トポロジカルソート、バッファ管理）
+│   ├── engine.rs         — cpalオーディオエンジン（AudioGraph + Chain併用）
+│   ├── node.rs           — ノード型定義（NodeId, NodeType, Port, etc.）
+│   ├── graph.rs          — AudioGraph（DAG処理、トポロジカルソート、バッファ管理）
+│   └── graph_command.rs  — **[新規]** UI→Audioスレッド間コマンドキュー
 ├── ui/
 │   ├── mod.rs
 │   ├── theme.rs          — ダークテーマ色定数
@@ -71,6 +72,41 @@ src/
 - **自動チャンネル変換**: Mono→Stereo（複製）、Stereo→Mono（平均）を接続時に暗黙的に行う
 - **Bypass/Disable 対応**: bypass時はパススルー、disable時はサイレント出力
 
+### Phase 2-1: AudioEngine の Chain → AudioGraph 置換 ✅ 完了
+
+- `engine.rs` に `Arc<Mutex<AudioGraph>>` を追加
+- オーディオコールバック内で `graph.process()` を使用（Chain と並行稼働）
+- Input→Output の基本グラフを `new()` で構築
+- 従来の `Chain` は残存（後方互換、VSTプラグインラック用）
+
+### Phase 2-2: Command Queue パターン ✅ 完了
+
+**src/audio/graph_command.rs** — `GraphCommand` enum:
+- `AddNode(NodeType)` — ノード追加
+- `RemoveNode(NodeId)` — ノード削除
+- `SetNodeEnabled(NodeId, bool)` — 有効/無効
+- `SetNodeBypassed(NodeId, bool)` — バイパス
+- `SetNodeState(NodeId, NodeInternalState)` — パラメータ設定
+- `SetNodePosition(NodeId, f32, f32)` — UI位置
+- `Connect(Connection)` — 接続
+- `Disconnect { source, target }` — 切断
+- `CommitTopology` — トポロジ再計算
+
+**engine.rs 側の実装**:
+- `crossbeam_channel::unbounded()` で UI→Audio 間のチャンネルを構築
+- チャンネルは `AudioEngine::new()` で一度だけ生成（`start()` 再呼び出しでも維持）
+- オーディオコールバック内で `cmd_rx.try_recv()` ループ → `apply_command()` で一括処理
+- UI側からの型安全なヘルパーメソッド群:
+  - `graph_add_node()`, `graph_remove_node()`, `graph_connect()`, `graph_disconnect()`
+  - `graph_set_enabled()`, `graph_set_bypassed()`, `graph_set_state()`
+  - `graph_commit_topology()`, `graph_send_command()`
+- `send_command()` — 内部送信（エラーログ付き）
+- `drain_pending_commands()` — UIスレッドからの手動ドレイン用
+
+**設計上の注意点**:
+- `AddNode` は非同期のため、生成された `NodeId` はUI側に返らない。Phase 3 で `AddNodeWithId(NodeId, NodeType)` またはレスポンスチャンネルの追加が必要
+- `drain_pending_commands()` は `graph.lock()` を取得するため、オーディオスレッドとのロック競合に注意（Phase 2-3 のダブルバッファで解決予定）
+
 ### テスト結果（13テスト全パス）
 - `test_add_audio_input_output` — シングルトンノードの追加
 - `test_singleton_violation` — 二重追加の拒否
@@ -86,30 +122,22 @@ src/
 - `test_bypass_node` — バイパス時のパススルー
 - `test_disabled_node` — 無効時のサイレント出力
 
-### Phase 2〜4: 未実装
+### Phase 2 残り 〜 Phase 4: 未実装
 
 | Phase | 内容 | 状態 |
 |-------|------|------|
-| Phase 2 | エンジン統合（Chain→AudioGraph置換、Command Queue、ダブルバッファ） | 未着手 |
+| 2-3 | ダブルバッファ戦略（arc_swap、ロックフリー処理） | 未着手 |
+| 2-4 | Looper/Metronome のノード化 | 未着手 |
+| 2-5 | 後方互換セッション読み込み | 未着手 |
 | Phase 3 | ノードエディタUI | 未着手 |
 | Phase 4 | 高度なルーティング（Send/Return、Wet/Dry） | 未着手 |
 
-## 次にやること（Phase 2: エンジン統合）
+## 次にやること（Phase 2-3: ダブルバッファ戦略）
 
-### 2-1: AudioEngine の Chain → AudioGraph 置換
-- `engine.rs` の `Arc<Mutex<Chain>>` を `Arc<Mutex<AudioGraph>>` に変更
-- オーディオコールバック内の処理フローを `graph.process()` に変更
-- 従来の `Chain` は残す（後方互換）
-
-### 2-2: Command Queue パターン
-- UI→Audio スレッド間のコマンド送信に `crossbeam::channel` を使用
-- `GraphCommand` enum（AddNode, RemoveNode, Connect, Disconnect, SetParameter等）
-- オーディオスレッドではロック・アロケーション禁止
-
-### 2-3: ダブルバッファ戦略
 - UIスレッドでグラフ構造をクローン→変更→トポロジ計算
-- `Arc<AtomicPtr>` または `arc_swap` でアトミックにスワップ
-- オーディオスレッドは不変参照で処理
+- `arc_swap` クレートでアトミックにスワップ
+- オーディオスレッドは不変参照で処理（ロック不要化）
+- `drain_pending_commands()` のロック競合問題を解消
 
 ### 2-4: Looper/Metronome のノード化
 - 現在のスタンドアローン `Looper`/`Metronome` を AudioGraph 内のノードに統合
@@ -134,3 +162,8 @@ src/
 - AudioInput: 常に 1ch (Mono)
 - AudioOutput: 常に 2ch (Stereo)
 - 自動チャンネル変換は `connect()` 時に許可し、`gather_inputs()` で実行
+
+### Command Queue 設計
+- `crossbeam_channel` は unbounded（キュー溢れなし）
+- オーディオスレッド側で `try_recv()` ループにより全コマンドを1ブロック内で処理
+- UI→Audio 方向のみ（Audio→UI のフィードバックは未実装、Phase 3 で検討）

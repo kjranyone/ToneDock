@@ -5,6 +5,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::audio::chain::Chain;
+use crate::audio::graph::AudioGraph;
+use crate::audio::graph_command::GraphCommand;
+use crate::audio::node::{Connection, NodeId, NodeInternalState, NodeType, PortId};
 use crate::looper::Looper;
 use crate::metronome::Metronome;
 
@@ -30,6 +33,7 @@ pub struct AudioEngine {
     pub sample_rate: f64,
     pub buffer_size: u32,
     pub chain: Arc<Mutex<Chain>>,
+    pub graph: Arc<Mutex<AudioGraph>>,
     pub metronome: Arc<Mutex<Metronome>>,
     pub looper: Arc<Mutex<Looper>>,
     pub master_volume: Arc<Mutex<f32>>,
@@ -38,12 +42,59 @@ pub struct AudioEngine {
     pub input_level: Arc<Mutex<(f32, f32)>>,
     pub input_channels: (usize, usize),
     pub output_channels: (usize, usize),
+    pub chain_node_ids: Vec<NodeId>,
+    pub input_node_id: NodeId,
+    pub output_node_id: NodeId,
 
     stream: Option<Stream>,
     input_stream: Option<Stream>,
     host_id: Option<HostId>,
     input_device_name: Option<String>,
     output_device_name: Option<String>,
+
+    command_tx: crossbeam_channel::Sender<GraphCommand>,
+    command_rx: crossbeam_channel::Receiver<GraphCommand>,
+}
+
+fn apply_command(graph: &mut AudioGraph, cmd: GraphCommand) {
+    match cmd {
+        GraphCommand::AddNode(node_type) => {
+            if let Ok(_id) = graph.add_node(node_type) {
+                log::debug!("GraphCommand::AddNode processed");
+            }
+        }
+        GraphCommand::RemoveNode(id) => {
+            graph.remove_node(id);
+            log::debug!("GraphCommand::RemoveNode({:?}) processed", id);
+        }
+        GraphCommand::SetNodeEnabled(id, enabled) => {
+            graph.set_node_enabled(id, enabled);
+        }
+        GraphCommand::SetNodeBypassed(id, bypassed) => {
+            graph.set_node_bypassed(id, bypassed);
+        }
+        GraphCommand::SetNodeState(id, state) => {
+            if let Some(node) = graph.get_node_mut(id) {
+                node.internal_state = state;
+            }
+        }
+        GraphCommand::SetNodePosition(id, x, y) => {
+            graph.set_node_position(id, x, y);
+        }
+        GraphCommand::Connect(conn) => {
+            if let Err(e) = graph.connect(conn) {
+                log::warn!("GraphCommand::Connect failed: {}", e);
+            }
+        }
+        GraphCommand::Disconnect { source, target } => {
+            graph.disconnect(source, target);
+        }
+        GraphCommand::CommitTopology => {
+            if let Err(e) = graph.commit_topology() {
+                log::error!("GraphCommand::CommitTopology failed: {}", e);
+            }
+        }
+    }
 }
 
 pub fn enumerate_hosts() -> Vec<AudioHostInfo> {
@@ -158,10 +209,27 @@ impl AudioEngine {
 
         let num_channels = out_channels.max(in_channels).max(2);
 
+        let mut graph = AudioGraph::new(sample_rate, buffer_size as usize);
+        let input_id = graph.add_node(NodeType::AudioInput).unwrap();
+        let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
+        graph
+            .connect(Connection {
+                source_node: input_id,
+                source_port: PortId(0),
+                target_node: output_id,
+                target_port: PortId(0),
+            })
+            .unwrap();
+        graph.commit_topology().unwrap();
+
+        let (cmd_tx, cmd_rx): (crossbeam_channel::Sender<GraphCommand>, _) =
+            crossbeam_channel::unbounded();
+
         Ok(Self {
             sample_rate,
             buffer_size,
             chain: Arc::new(Mutex::new(Chain::new())),
+            graph: Arc::new(Mutex::new(graph)),
             metronome: Arc::new(Mutex::new(Metronome::new(sample_rate))),
             looper: Arc::new(Mutex::new(Looper::new(num_channels, sample_rate))),
             master_volume: Arc::new(Mutex::new(0.8)),
@@ -177,6 +245,11 @@ impl AudioEngine {
                 .default_input_device()
                 .map(|d| d.name().unwrap_or_default()),
             output_device_name: Some(output_device.name().unwrap_or_default()),
+            command_tx: cmd_tx,
+            command_rx: cmd_rx,
+            chain_node_ids: Vec::new(),
+            input_node_id: input_id,
+            output_node_id: output_id,
         })
     }
 
@@ -200,7 +273,9 @@ impl AudioEngine {
         let out_config = config_from_range(output_range, self.sample_rate as u32, self.buffer_size);
         let out_ch_count = out_config.channels as usize;
 
-        let chain = self.chain.clone();
+        let cmd_rx = self.command_rx.clone();
+
+        let graph = self.graph.clone();
         let metronome = self.metronome.clone();
         let looper = self.looper.clone();
         let master_volume = self.master_volume.clone();
@@ -262,57 +337,48 @@ impl AudioEngine {
 
                 let gain = *input_gain.lock();
 
-                let mut temp_io: Vec<Vec<f32>> = vec![vec![0.0f32; num_frames]; channels];
-
+                let mut input_mono = vec![0.0f32; num_frames];
                 {
                     let mut guard = input_buffer_for_output.lock();
                     if let Some(captured) = guard.pop_front() {
-                        let in_ch_count = captured.len();
-                        for ch in 0..channels.min(in_ch_count) {
-                            let src = if ch <= input_ch.0 {
-                                input_ch.0.min(in_ch_count - 1)
-                            } else {
-                                input_ch.1.min(in_ch_count - 1)
-                            };
-                            for frame in 0..num_frames.min(captured[src].len()) {
-                                temp_io[ch][frame] = captured[src][frame] * gain;
-                            }
+                        let src_ch = input_ch.0.min(captured.len().saturating_sub(1));
+                        for frame in 0..num_frames.min(captured[src_ch].len()) {
+                            input_mono[frame] = captured[src_ch][frame] * gain;
                         }
                     }
                 }
 
                 {
                     let mut il = input_level.lock();
-                    let l_ch = input_ch.0.min(channels - 1);
-                    let r_ch = input_ch.1.min(channels - 1);
-                    let mut peak_l = 0.0f32;
-                    let mut peak_r = 0.0f32;
+                    let mut peak = 0.0f32;
                     for frame in 0..num_frames {
-                        peak_l = peak_l.max(temp_io[l_ch][frame].abs());
-                        peak_r = peak_r.max(temp_io[r_ch][frame].abs());
+                        peak = peak.max(input_mono[frame].abs());
                     }
-                    *il = (peak_l, peak_r);
+                    *il = (peak, peak);
                 }
 
+                let mut output_stereo = vec![vec![0.0f32; num_frames]; 2];
                 {
-                    let mut chain = chain.lock();
-                    let mut output_slices: Vec<&mut [f32]> =
-                        temp_io.iter_mut().map(|v| &mut v[..]).collect();
-                    chain.process(&[], &mut output_slices, num_frames);
-                }
-
-                {
-                    let mut lpr = looper.lock();
-                    let mut slices: Vec<&mut [f32]> =
-                        temp_io.iter_mut().map(|v| &mut v[..]).collect();
-                    lpr.process(&mut slices, num_frames);
+                    let mut graph_guard = graph.lock();
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        apply_command(&mut graph_guard, cmd);
+                    }
+                    let input = vec![input_mono];
+                    output_stereo = graph_guard.process(&input, num_frames);
                 }
 
                 {
                     let mut met = metronome.lock();
                     let mut slices: Vec<&mut [f32]> =
-                        temp_io.iter_mut().map(|v| &mut v[..]).collect();
+                        output_stereo.iter_mut().map(|v| &mut v[..]).collect();
                     met.process(&mut slices, num_frames);
+                }
+
+                {
+                    let mut lpr = looper.lock();
+                    let mut slices: Vec<&mut [f32]> =
+                        output_stereo.iter_mut().map(|v| &mut v[..]).collect();
+                    lpr.process(&mut slices, num_frames);
                 }
 
                 let vol = *master_volume.lock();
@@ -323,8 +389,8 @@ impl AudioEngine {
                 let mut peak_r = 0.0f32;
 
                 for frame in 0..num_frames {
-                    let l = temp_io[out_l].get(frame).copied().unwrap_or(0.0) * vol;
-                    let r = temp_io[out_r].get(frame).copied().unwrap_or(0.0) * vol;
+                    let l = output_stereo[0].get(frame).copied().unwrap_or(0.0) * vol;
+                    let r = output_stereo[1].get(frame).copied().unwrap_or(0.0) * vol;
 
                     peak_l = peak_l.max(l.abs());
                     peak_r = peak_r.max(r.abs());
@@ -364,6 +430,19 @@ impl AudioEngine {
     pub fn stop(&mut self) {
         self.stream = None;
         self.input_stream = None;
+    }
+
+    pub fn send_command(&self, cmd: GraphCommand) {
+        if let Err(e) = self.command_tx.send(cmd) {
+            log::error!("Failed to send graph command: {:?}", e);
+        }
+    }
+
+    pub fn drain_pending_commands(&self) {
+        while let Ok(cmd) = self.command_rx.try_recv() {
+            let mut graph = self.graph.lock();
+            apply_command(&mut graph, cmd);
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -568,5 +647,41 @@ impl AudioEngine {
         };
 
         Some(cfg.channels())
+    }
+
+    pub fn graph_add_node(&self, node_type: NodeType) {
+        self.send_command(GraphCommand::AddNode(node_type));
+    }
+
+    pub fn graph_remove_node(&self, id: NodeId) {
+        self.send_command(GraphCommand::RemoveNode(id));
+    }
+
+    pub fn graph_connect(&self, conn: Connection) {
+        self.send_command(GraphCommand::Connect(conn));
+    }
+
+    pub fn graph_disconnect(&self, source: (NodeId, PortId), target: (NodeId, PortId)) {
+        self.send_command(GraphCommand::Disconnect { source, target });
+    }
+
+    pub fn graph_set_enabled(&self, id: NodeId, enabled: bool) {
+        self.send_command(GraphCommand::SetNodeEnabled(id, enabled));
+    }
+
+    pub fn graph_set_bypassed(&self, id: NodeId, bypassed: bool) {
+        self.send_command(GraphCommand::SetNodeBypassed(id, bypassed));
+    }
+
+    pub fn graph_set_state(&self, id: NodeId, state: NodeInternalState) {
+        self.send_command(GraphCommand::SetNodeState(id, state));
+    }
+
+    pub fn graph_commit_topology(&self) {
+        self.send_command(GraphCommand::CommitTopology);
+    }
+
+    pub fn graph_send_command(&self, cmd: GraphCommand) {
+        self.send_command(cmd);
     }
 }

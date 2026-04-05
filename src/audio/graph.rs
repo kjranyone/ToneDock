@@ -379,10 +379,10 @@ impl AudioGraph {
         false
     }
 
-    pub fn process(&mut self, input: &[Vec<f32>], num_frames: usize) -> Vec<Vec<f32>> {
+    fn process_internal(&mut self, input: &[Vec<f32>], num_frames: usize) {
         if self.topology_dirty {
             if self.commit_topology().is_err() {
-                return vec![vec![0.0f32; num_frames]; 2];
+                return;
             }
         }
 
@@ -423,33 +423,55 @@ impl AudioGraph {
 
             self.process_node(node_id, num_frames);
         }
+    }
+
+    pub fn process(&mut self, input: &[Vec<f32>], num_frames: usize) -> Vec<Vec<f32>> {
+        self.process_internal(input, num_frames);
 
         let output_id = self.output_node_id;
         if let Some(output_id) = output_id {
-            let output_data = {
-                let output_node = self.nodes.get(&output_id).unwrap();
-                if let Some(Some(buf)) = output_node.input_buffers.get(0) {
-                    let ch_count = buf.len().min(2);
-                    let mut result = vec![vec![0.0f32; num_frames]; 2];
-                    for ch in 0..ch_count {
-                        let copy_len = num_frames.min(buf[ch].len());
-                        result[ch][..copy_len].copy_from_slice(&buf[ch][..copy_len]);
-                    }
-                    if ch_count == 1 {
-                        let (left, right) = result.split_at_mut(1);
-                        right[0][..num_frames].copy_from_slice(&left[0][..num_frames]);
-                    }
-                    Some(result)
-                } else {
-                    None
+            let output_node = self.nodes.get(&output_id).unwrap();
+            if let Some(Some(buf)) = output_node.input_buffers.get(0) {
+                let ch_count = buf.len().min(2);
+                let mut result = vec![vec![0.0f32; num_frames]; 2];
+                for ch in 0..ch_count {
+                    let copy_len = num_frames.min(buf[ch].len());
+                    result[ch][..copy_len].copy_from_slice(&buf[ch][..copy_len]);
                 }
-            };
-            if let Some(result) = output_data {
+                if ch_count == 1 {
+                    let (left, right) = result.split_at_mut(1);
+                    right[0][..num_frames].copy_from_slice(&left[0][..num_frames]);
+                }
                 return result;
             }
         }
 
         vec![vec![0.0f32; num_frames]; 2]
+    }
+
+    pub fn process_into(&mut self, input: &[Vec<f32>], output: &mut [Vec<f32>], num_frames: usize) {
+        for ch in output.iter_mut() {
+            let len = num_frames.min(ch.len());
+            ch[..len].fill(0.0);
+        }
+
+        self.process_internal(input, num_frames);
+
+        let output_id = self.output_node_id;
+        if let Some(output_id) = output_id {
+            let output_node = self.nodes.get(&output_id).unwrap();
+            if let Some(Some(buf)) = output_node.input_buffers.get(0) {
+                let ch_count = buf.len().min(output.len());
+                for ch in 0..ch_count {
+                    let copy_len = num_frames.min(output[ch].len()).min(buf[ch].len());
+                    output[ch][..copy_len].copy_from_slice(&buf[ch][..copy_len]);
+                }
+                if ch_count == 1 && output.len() >= 2 {
+                    let copy_len = num_frames.min(output[0].len()).min(buf[0].len());
+                    output[1][..copy_len].copy_from_slice(&buf[0][..copy_len]);
+                }
+            }
+        }
     }
 
     fn gather_inputs(&mut self, node_id: NodeId, num_frames: usize) {
