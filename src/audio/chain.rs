@@ -29,8 +29,16 @@ impl Chain {
         sample_rate: f64,
         block_size: i32,
     ) -> anyhow::Result<()> {
+        log::info!(
+            "Chain::add_plugin start: {} (sr={}, bs={})",
+            info.name,
+            sample_rate,
+            block_size
+        );
         let mut plugin = LoadedPlugin::load(info)?;
+        log::info!("Chain: LoadedPlugin::load succeeded for {}", info.name);
         plugin.setup_processing(sample_rate, block_size)?;
+        log::info!("Chain: setup_processing succeeded for {}", info.name);
         let slot = PluginSlot {
             info: info.clone(),
             instance: Some(plugin),
@@ -38,6 +46,11 @@ impl Chain {
             bypassed: false,
         };
         self.slots.push(slot);
+        log::info!(
+            "Chain: plugin {} added to chain (total slots: {})",
+            info.name,
+            self.slots.len()
+        );
         Ok(())
     }
 

@@ -33,11 +33,18 @@ pub struct LoadedPlugin {
 
 impl LoadedPlugin {
     pub fn load(info: &PluginInfo) -> anyhow::Result<Self> {
+        log::info!(
+            "LoadedPlugin::load start: {:?} (is_dir={})",
+            info.path,
+            info.path.is_dir()
+        );
         let dll_path = Self::find_dll(&info.path)?;
+        log::info!("Found DLL: {:?}", dll_path);
         let library = unsafe {
             libloading::Library::new(&dll_path)
                 .map_err(|e| anyhow::anyhow!("Failed to load library: {}", e))?
         };
+        log::info!("Library loaded successfully");
 
         let get_factory: libloading::Symbol<unsafe extern "system" fn() -> *mut c_void> = unsafe {
             library
@@ -49,6 +56,7 @@ impl LoadedPlugin {
         if factory_ptr.is_null() {
             return Err(anyhow::anyhow!("Factory returned null"));
         }
+        log::info!("GetPluginFactory returned non-null");
 
         let factory: ComPtr<IPluginFactory> = unsafe {
             ComPtr::from_raw(factory_ptr as *mut IPluginFactory)
@@ -56,6 +64,7 @@ impl LoadedPlugin {
         };
 
         let class_count = unsafe { factory.countClasses() };
+        log::info!("Factory class count: {}", class_count);
         if class_count <= 0 {
             return Err(anyhow::anyhow!("No classes found in plugin"));
         }
@@ -67,6 +76,7 @@ impl LoadedPlugin {
             if result == kResultOk {
                 let cat =
                     unsafe { std::ffi::CStr::from_ptr(class_info.category.as_ptr() as *const i8) };
+                log::info!("Class {}: category={:?}", i, cat.to_bytes());
                 if cat.to_bytes() == b"Audio Module Class" {
                     target_cid = Some(class_info.cid);
                     break;
@@ -75,6 +85,7 @@ impl LoadedPlugin {
         }
 
         let cid = target_cid.ok_or_else(|| anyhow::anyhow!("No audio processor class found"))?;
+        log::info!("Found audio processor class");
 
         let iid_component = <IComponent as Interface>::IID;
         let mut obj_ptr: *mut c_void = std::ptr::null_mut();
@@ -89,6 +100,7 @@ impl LoadedPlugin {
         if result != kResultOk || obj_ptr.is_null() {
             return Err(anyhow::anyhow!("createInstance failed"));
         }
+        log::info!("createInstance succeeded");
 
         let component: ComPtr<IComponent> = unsafe {
             ComPtr::from_raw(obj_ptr as *mut IComponent)
@@ -97,6 +109,7 @@ impl LoadedPlugin {
 
         unsafe {
             let result = component.initialize(std::ptr::null_mut());
+            log::info!("initialize() returned: {}", result);
             if result != kResultOk {
                 return Err(anyhow::anyhow!("initialize() failed: {}", result));
             }
@@ -104,6 +117,7 @@ impl LoadedPlugin {
 
         let num_inputs = unsafe { component.getBusCount(MEDIA_TYPE_AUDIO, BUS_DIR_INPUT) };
         let num_outputs = unsafe { component.getBusCount(MEDIA_TYPE_AUDIO, BUS_DIR_OUTPUT) };
+        log::info!("Bus counts: inputs={}, outputs={}", num_inputs, num_outputs);
 
         for i in 0..num_inputs.max(0) {
             unsafe {
@@ -115,13 +129,24 @@ impl LoadedPlugin {
                 component.activateBus(MEDIA_TYPE_AUDIO, BUS_DIR_OUTPUT, i, 1 as TBool);
             }
         }
+        log::info!("Buses activated");
 
         let audio_processor: ComPtr<IAudioProcessor> = component
             .cast::<IAudioProcessor>()
             .ok_or_else(|| anyhow::anyhow!("IAudioProcessor not supported"))?;
+        log::info!("IAudioProcessor interface obtained");
 
         let edit_controller: Option<ComPtr<IEditController>> = component.cast::<IEditController>();
+        log::info!(
+            "IEditController: {}",
+            if edit_controller.is_some() {
+                "available"
+            } else {
+                "not available"
+            }
+        );
 
+        log::info!("LoadedPlugin::load completed successfully");
         Ok(Self {
             _library: library,
             component,
@@ -134,6 +159,11 @@ impl LoadedPlugin {
     }
 
     pub fn setup_processing(&mut self, sample_rate: f64, block_size: i32) -> anyhow::Result<()> {
+        log::info!(
+            "setup_processing start: sr={}, bs={}",
+            sample_rate,
+            block_size
+        );
         let mut setup = ProcessSetup {
             processMode: PROCESS_MODE_REALTIME,
             symbolicSampleSize: SYMBOLIC_SAMPLE_SIZE_32,
@@ -142,6 +172,7 @@ impl LoadedPlugin {
         };
 
         let result = unsafe { self.audio_processor.setupProcessing(&mut setup) };
+        log::info!("setupProcessing returned: {}", result);
         if result != kResultOk {
             return Err(anyhow::anyhow!("setupProcessing failed: {}", result));
         }
@@ -161,13 +192,16 @@ impl LoadedPlugin {
                 self.num_outputs,
             );
         }
+        log::info!("setBusArrangements called");
 
         unsafe {
             self.component.setActive(1 as TBool);
         }
+        log::info!("setActive(true) called");
         unsafe {
             self.audio_processor.setProcessing(1 as TBool);
         }
+        log::info!("setProcessing(true) called, setup_processing complete");
 
         Ok(())
     }
@@ -286,12 +320,12 @@ impl LoadedPlugin {
             let entry = entry.ok()?;
             let path = entry.path();
             if path.is_file() {
-                if path
+                let is_binary = path
                     .extension()
                     .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("dll"))
-                    .unwrap_or(false)
-                {
+                    .map(|e| e.eq_ignore_ascii_case("dll") || e.eq_ignore_ascii_case("vst3"))
+                    .unwrap_or(false);
+                if is_binary {
                     return Some(path);
                 }
             } else if let Some(dll) = Self::find_dll_recursive(&path, depth - 1) {

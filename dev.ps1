@@ -23,7 +23,9 @@ function Invoke-DevCommand {
     switch ($Cmd) {
         { $_ -in "1", "run" } {
             Write-Host "[dev] cargo run ..." -ForegroundColor Green
+            $env:RUST_LOG = "info"
             cargo run $args
+            Remove-Item Env:RUST_LOG
         }
         { $_ -in "2", "watch" } {
             $watchExists = Get-Command cargo-watch -ErrorAction SilentlyContinue

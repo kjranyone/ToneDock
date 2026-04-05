@@ -410,12 +410,33 @@ impl App for ToneDockApp {
                         for cmd in commands {
                             match cmd {
                                 crate::ui::rack_view::RackCommand::Add(plugin_idx) => {
+                                    log::info!("Add command received: plugin_idx={}", plugin_idx);
                                     if let Some(info) = available.get(plugin_idx).cloned() {
-                                        if let Err(e) = chain.add_plugin(&info, sr, bs) {
-                                            self.status_message = format!("Load error: {}", e);
-                                        } else {
-                                            self.status_message = format!("Loaded: {}", info.name);
+                                        log::info!(
+                                            "Loading plugin: {} from {:?}",
+                                            info.name,
+                                            info.path
+                                        );
+                                        match chain.add_plugin(&info, sr, bs) {
+                                            Ok(()) => {
+                                                log::info!(
+                                                    "Plugin loaded successfully: {}",
+                                                    info.name
+                                                );
+                                                self.status_message =
+                                                    format!("Loaded: {}", info.name);
+                                            }
+                                            Err(e) => {
+                                                log::error!("Load error for {}: {}", info.name, e);
+                                                self.status_message = format!("Load error: {}", e);
+                                            }
                                         }
+                                    } else {
+                                        log::warn!(
+                                            "plugin_idx {} out of bounds (available: {})",
+                                            plugin_idx,
+                                            available.len()
+                                        );
                                     }
                                 }
                                 crate::ui::rack_view::RackCommand::Remove(idx) => {

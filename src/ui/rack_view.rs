@@ -38,6 +38,15 @@ impl RackView {
                 ui.add_space(8.0);
 
                 ui.menu_button("+ Add Plugin", |ui| {
+                    if available_plugins.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "No plugins found.\nOpen Preferences → Plugins\nto add VST3 paths.",
+                            )
+                            .size(10.0)
+                            .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+                    }
                     for (i, plugin) in available_plugins.iter().enumerate() {
                         if ui.button(&plugin.name).clicked() {
                             commands.push(RackCommand::Add(i));
