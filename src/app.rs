@@ -3,12 +3,13 @@ use std::sync::Arc;
 use eframe::App;
 use egui::*;
 
-use std::sync::Arc;
-
 use crate::audio::engine::AudioEngine;
-
-use std::sync::Arc;
-
+use crate::audio::node::{
+    ChannelConfig, Connection, LooperNodeState, MetronomeNodeState, NodeId, NodeInternalState,
+    NodeType, PortId,
+};
+use crate::session::Session;
+use crate::ui::node_editor::{EdCmd, NodeEditor, NodeSnap};
 use crate::ui::preferences::{PreferencesResult, PreferencesState};
 use crate::ui::rack_view::RackView;
 use crate::vst_host::scanner::PluginInfo;
@@ -213,6 +214,7 @@ impl ToneDockApp {
                     bypassed: node.bypassed,
                     position: node.position,
                     parameters: Vec::new(),
+                    internal_state: node.internal_state.clone(),
                 });
             }
             Some(crate::audio::node::SerializedGraph {
@@ -987,7 +989,7 @@ impl ToneDockApp {
                 );
                 {
                     let guard = self.audio_engine.graph.load();
-                    if let Some(node) = guard.get_node(pan_l_id) {
+                    if guard.get_node(pan_l_id).is_some() {
                         let mut staging = (**guard).clone();
                         drop(guard);
                         if let Some(n) = staging.get_node_mut(pan_l_id) {
@@ -1099,6 +1101,113 @@ impl ToneDockApp {
                 self.audio_engine.graph_commit_topology();
                 self.audio_engine.apply_commands_to_staging();
                 self.status_message = "Template: Mono→Stereo Reverb applied".into();
+            }
+            "send_return_reverb" => {
+                let send_id = self.audio_engine.add_node_with_position(
+                    NodeType::SendBus { bus_id: 1 },
+                    base_pos.0,
+                    base_pos.1 + 50.0,
+                );
+                let return_id = self.audio_engine.add_node_with_position(
+                    NodeType::ReturnBus { bus_id: 1 },
+                    base_pos.0 + 120.0,
+                    base_pos.1 + 200.0,
+                );
+                let mixer_id = self.audio_engine.add_node_with_position(
+                    NodeType::Mixer { inputs: 2 },
+                    base_pos.0,
+                    base_pos.1 + 350.0,
+                );
+
+                self.audio_engine.graph_connect(Connection {
+                    source_node: send_id,
+                    source_port: PortId(0),
+                    target_node: mixer_id,
+                    target_port: PortId(0),
+                });
+                self.audio_engine.graph_connect(Connection {
+                    source_node: send_id,
+                    source_port: PortId(1),
+                    target_node: return_id,
+                    target_port: PortId(0),
+                });
+                self.audio_engine.graph_connect(Connection {
+                    source_node: return_id,
+                    source_port: PortId(0),
+                    target_node: mixer_id,
+                    target_port: PortId(1),
+                });
+                self.audio_engine.graph_commit_topology();
+                self.audio_engine.apply_commands_to_staging();
+                self.status_message = "Template: Send/Return Reverb applied".into();
+            }
+            "parallel_chain" => {
+                let splitter_id = self.audio_engine.add_node_with_position(
+                    NodeType::Splitter { outputs: 2 },
+                    base_pos.0,
+                    base_pos.1 + 50.0,
+                );
+                let gain_a_id = self.audio_engine.add_node_with_position(
+                    NodeType::Gain,
+                    base_pos.0 - 80.0,
+                    base_pos.1 + 150.0,
+                );
+                {
+                    let guard = self.audio_engine.graph.load();
+                    let mut staging = (**guard).clone();
+                    drop(guard);
+                    if let Some(n) = staging.get_node_mut(gain_a_id) {
+                        n.internal_state = NodeInternalState::Gain { value: 0.8 };
+                    }
+                    self.audio_engine.graph.store(Arc::new(staging));
+                }
+                let gain_b_id = self.audio_engine.add_node_with_position(
+                    NodeType::Gain,
+                    base_pos.0 + 80.0,
+                    base_pos.1 + 150.0,
+                );
+                {
+                    let guard = self.audio_engine.graph.load();
+                    let mut staging = (**guard).clone();
+                    drop(guard);
+                    if let Some(n) = staging.get_node_mut(gain_b_id) {
+                        n.internal_state = NodeInternalState::Gain { value: 0.6 };
+                    }
+                    self.audio_engine.graph.store(Arc::new(staging));
+                }
+                let mixer_id = self.audio_engine.add_node_with_position(
+                    NodeType::Mixer { inputs: 2 },
+                    base_pos.0,
+                    base_pos.1 + 250.0,
+                );
+
+                self.audio_engine.graph_connect(Connection {
+                    source_node: splitter_id,
+                    source_port: PortId(0),
+                    target_node: gain_a_id,
+                    target_port: PortId(0),
+                });
+                self.audio_engine.graph_connect(Connection {
+                    source_node: splitter_id,
+                    source_port: PortId(1),
+                    target_node: gain_b_id,
+                    target_port: PortId(0),
+                });
+                self.audio_engine.graph_connect(Connection {
+                    source_node: gain_a_id,
+                    source_port: PortId(0),
+                    target_node: mixer_id,
+                    target_port: PortId(0),
+                });
+                self.audio_engine.graph_connect(Connection {
+                    source_node: gain_b_id,
+                    source_port: PortId(0),
+                    target_node: mixer_id,
+                    target_port: PortId(1),
+                });
+                self.audio_engine.graph_commit_topology();
+                self.audio_engine.apply_commands_to_staging();
+                self.status_message = "Template: Parallel Chain applied".into();
             }
             _ => {
                 self.status_message = format!("Unknown template: {}", name);

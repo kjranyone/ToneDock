@@ -252,6 +252,7 @@ pub enum NodeInternalState {
     Gain { value: f32 },
     Pan { value: f32 },
     WetDry { mix: f32 },
+    SendBus { send_level: f32 },
 }
 
 impl Default for NodeInternalState {
@@ -282,7 +283,24 @@ pub struct SerializedNode {
     pub enabled: bool,
     pub bypassed: bool,
     pub position: (f32, f32),
+    #[serde(default)]
     pub parameters: Vec<(u32, f32)>,
+    #[serde(default)]
+    pub internal_state: NodeInternalState,
+}
+
+impl Default for SerializedNode {
+    fn default() -> Self {
+        Self {
+            id: NodeId(0),
+            node_type: NodeType::AudioInput,
+            enabled: true,
+            bypassed: false,
+            position: (0.0, 0.0),
+            parameters: Vec::new(),
+            internal_state: NodeInternalState::None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

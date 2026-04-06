@@ -162,7 +162,8 @@ src/
 | 3-1 | ノードエディタUI（基礎） | ✅ 完了 |
 | 3-2 | ノードエディタUI（パラメータ編集・接続削除・複製・ズームフィット） | ✅ 完了 |
 | 3-3 | ノードエディタUI（VSTプラグイン統合） | ✅ 完了 |
-| Phase 4 | 高度なルーティング（セッション保存/復元・マイグレーション） | ✅ 完了 |
+| Phase 4 | セッション保存/復元・マイグレーション | ✅ 完了 |
+| Phase 4b | 高度なルーティング（Send/Return, Wet/Dry, テンプレート） | ✅ 完了 |
 
 ### Phase 3-1: ノードエディタUI（基礎） ✅ 完了
 
@@ -341,16 +342,35 @@ src/
 **src/audio/engine.rs**:
 - `load_serialized_graph()` — SerializedGraph から AudioGraph を復元（ID マッピング、シングルトン制約、トポロジコミット、ArcSwap store）
 
+### Phase 4b: 高度なルーティング（Send/Return, Wet/Dry, テンプレート） ✅ 完了
+
+**src/audio/node.rs**:
+- `NodeType` に `WetDry`, `SendBus { bus_id: u32 }`, `ReturnBus { bus_id: u32 }` 追加
+- `NodeInternalState` に `WetDry { mix: f32 }`, `SendBus { send_level: f32 }` 追加
+
+**src/audio/graph.rs**:
+- `process_wetdry_node()` — dry*(1-mix) + wet*mix でミックス比制御
+- `process_send_bus_node()` — output 0 = スルー（パススルー）、output 1 = input * send_level
+- `process_return_bus_node()` — パススルー
+- テスト: `test_wetdry_node`, `test_wetdry_full_wet`, `test_send_return_bus`, `test_send_bus_zero_level`
+
+**src/ui/node_editor.rs**:
+- コンテキストメニューに "Send/Return Buses" セクション追加（Send Bus #1, Return Bus #1）
+- コンテキストメニューに "Templates" セクション追加（5種類のテンプレート）
+- パラメータバーに Wet/Dry と Send の表示・ドラッグ編集対応
+
+**src/app.rs**:
+- `apply_template()` — 5種類のルーティングテンプレート:
+  - `wide_stereo_amp` — Splitter→2x Pan→Mixer
+  - `dry_wet_blend` — Splitter→WetDry→Mixer
+  - `mono_stereo_reverb` — ChannelConverter(M→S)→Output
+  - `send_return_reverb` — SendBus→ReturnBus→Mixer
+  - `parallel_chain` — Splitter→2x Gain→Mixer
+- `process_editor_commands()` に `EdCmd::ApplyTemplate` ハンドラ追加
+
 ## 次にやること
 
-### Phase 5: 高度なルーティング（Send/Return、Wet/Dry）
-
-設計書 `docs/node_based_routing_design.md` の Phase 4 に該当する機能。現在未実装。
-
-- **Send/Return バス** — エフェクトのセンド/リターンルーティング
-- **Wet/Dry ノード** — エフェクトのミックス比制御
-- **パラレルチェーンのテンプレート** — "Wide Stereo Amp" 等のワンタップテンプレート
-- **ゼロコピースプリッター** — 出力バッファの参照共有でメモリコピー削減
+すべての設計フェーズ（Phase 1〜4）は完了。以下は今後の改善候補。
 
 ### その他の改善候補
 
@@ -371,7 +391,7 @@ src/
 - オーディオスレッド: `graph.load()` → `Guard` (不変参照) → `&self::process()`
 - UIスレッド: `graph.load()` → `clone()` → `apply_command()` → `graph.store(Arc::new(new_graph))`
 - `gather_inputs()` での `clone()` は `Mutex` ロック内で実行（オーディオスレッドのみがアクセスするため実質競合なし）
-- ゼロコピースプリッターの実装は Phase 4 で検討
+- ゼロコピースプリッターは `SharedBuffer`（Arc参照共有）で実装済み
 - `max_frames` はデフォルト 256、バッファサイズ変更時に全ノードのリサイズが必要
 
 ### ArcSwap 設計（Phase 2-3）

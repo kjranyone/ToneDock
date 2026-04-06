@@ -124,6 +124,7 @@ impl NodeEditor {
             NodeInternalState::Gain { .. }
                 | NodeInternalState::Pan { .. }
                 | NodeInternalState::WetDry { .. }
+                | NodeInternalState::SendBus { .. }
         )
     }
 
@@ -532,6 +533,7 @@ impl NodeEditor {
                 NodeInternalState::Gain { value } => *value,
                 NodeInternalState::Pan { value } => *value,
                 NodeInternalState::WetDry { mix } => *mix,
+                NodeInternalState::SendBus { send_level } => *send_level,
                 _ => 0.0,
             });
 
@@ -594,6 +596,24 @@ impl NodeEditor {
                     p.rect_filled(bar_rect, 2.0, Color32::from_rgb(25, 25, 35));
                     p.rect_filled(fill_r, 2.0, COL_PARAM_FILL);
                     let label = format!("Wet {:.0}%", value * 100.0);
+                    p.text(
+                        pos2(param_r.min.x + padding, bar_rect.min.y - param_fs - 1.0 * z),
+                        Align2::LEFT_BOTTOM,
+                        label,
+                        FontId::proportional(param_fs),
+                        crate::ui::theme::TEXT_PRIMARY,
+                    );
+                }
+                NodeInternalState::SendBus { .. } => {
+                    let fill_ratio = value.clamp(0.0, 1.0);
+                    let fill_w = bar_rect.width() * fill_ratio;
+                    let fill_r = Rect::from_min_max(
+                        bar_rect.min,
+                        pos2(bar_rect.min.x + fill_w, bar_rect.max.y),
+                    );
+                    p.rect_filled(bar_rect, 2.0, Color32::from_rgb(25, 25, 35));
+                    p.rect_filled(fill_r, 2.0, COL_PARAM_FILL);
+                    let label = format!("Send {:.0}%", value * 100.0);
                     p.text(
                         pos2(param_r.min.x + padding, bar_rect.min.y - param_fs - 1.0 * z),
                         Align2::LEFT_BOTTOM,
@@ -669,6 +689,7 @@ impl NodeEditor {
                             NodeInternalState::Gain { value } => Some(*value),
                             NodeInternalState::Pan { value } => Some(*value),
                             NodeInternalState::WetDry { mix } => Some(*mix),
+                            NodeInternalState::SendBus { send_level } => Some(*send_level),
                             _ => None,
                         })
                         .unwrap_or(0.0);
@@ -710,9 +731,14 @@ impl NodeEditor {
                         .find(|n| n.id == dp.node_id)
                         .map(|n| matches!(n.state, NodeInternalState::WetDry { .. }))
                         .unwrap_or(false);
+                    let is_sendbus = nodes
+                        .iter()
+                        .find(|n| n.id == dp.node_id)
+                        .map(|n| matches!(n.state, NodeInternalState::SendBus { .. }))
+                        .unwrap_or(false);
                     let new_value = if is_gain {
                         (dp.start_value + delta * PARAM_SENSITIVITY).clamp(0.0, 4.0)
-                    } else if is_wetdry {
+                    } else if is_wetdry || is_sendbus {
                         (dp.start_value + delta * PARAM_SENSITIVITY).clamp(0.0, 1.0)
                     } else {
                         (dp.start_value + delta * PARAM_SENSITIVITY).clamp(-1.0, 1.0)
@@ -723,6 +749,10 @@ impl NodeEditor {
                         NodeInternalState::Gain { value: new_value }
                     } else if is_wetdry {
                         NodeInternalState::WetDry { mix: new_value }
+                    } else if is_sendbus {
+                        NodeInternalState::SendBus {
+                            send_level: new_value,
+                        }
                     } else {
                         NodeInternalState::Pan { value: new_value }
                     };
@@ -956,6 +986,19 @@ impl NodeEditor {
             }
             if ui.button("Dry/Wet Blend").clicked() {
                 menu_cmds.push(EdCmd::ApplyTemplate("dry_wet_blend".into(), (mw.x, mw.y)));
+                menu_cmds.push(EdCmd::Commit);
+                ui.close_menu();
+            }
+            if ui.button("Send/Return Reverb").clicked() {
+                menu_cmds.push(EdCmd::ApplyTemplate(
+                    "send_return_reverb".into(),
+                    (mw.x, mw.y),
+                ));
+                menu_cmds.push(EdCmd::Commit);
+                ui.close_menu();
+            }
+            if ui.button("Parallel Chain").clicked() {
+                menu_cmds.push(EdCmd::ApplyTemplate("parallel_chain".into(), (mw.x, mw.y)));
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }

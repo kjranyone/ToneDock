@@ -65,6 +65,7 @@ impl Session {
             bypassed: false,
             position: (0.0, 0.0),
             parameters: Vec::new(),
+            internal_state: crate::audio::node::NodeInternalState::None,
         });
 
         let output_id = crate::audio::node::NodeId(2);
@@ -75,6 +76,7 @@ impl Session {
             bypassed: false,
             position: (0.0, 0.0),
             parameters: Vec::new(),
+            internal_state: crate::audio::node::NodeInternalState::None,
         });
 
         let mut prev_id = input_id;
@@ -98,6 +100,7 @@ impl Session {
                     .iter()
                     .map(|(idx, val)| (*idx as u32, *val))
                     .collect(),
+                internal_state: crate::audio::node::NodeInternalState::None,
             });
 
             connections.push(crate::audio::node::Connection {
@@ -146,7 +149,7 @@ mod tests {
                     enabled: true,
                     bypassed: false,
                     position: (0.0, 0.0),
-                    parameters: vec![],
+                    ..Default::default()
                 },
                 SerializedNode {
                     id: NodeId(2),
@@ -154,7 +157,7 @@ mod tests {
                     enabled: true,
                     bypassed: false,
                     position: (200.0, 0.0),
-                    parameters: vec![],
+                    ..Default::default()
                 },
                 SerializedNode {
                     id: NodeId(3),
@@ -162,7 +165,7 @@ mod tests {
                     enabled: true,
                     bypassed: false,
                     position: (400.0, 0.0),
-                    parameters: vec![],
+                    ..Default::default()
                 },
             ],
             connections: vec![
@@ -228,16 +231,14 @@ mod tests {
         assert_eq!(g.nodes.len(), 4);
         assert_eq!(g.connections.len(), 3);
 
-        assert!(
-            g.nodes
-                .iter()
-                .any(|n| matches!(n.node_type, NodeType::AudioInput))
-        );
-        assert!(
-            g.nodes
-                .iter()
-                .any(|n| matches!(n.node_type, NodeType::AudioOutput))
-        );
+        assert!(g
+            .nodes
+            .iter()
+            .any(|n| matches!(n.node_type, NodeType::AudioInput)));
+        assert!(g
+            .nodes
+            .iter()
+            .any(|n| matches!(n.node_type, NodeType::AudioOutput)));
         assert!(g.nodes.iter().any(|n| matches!(
             &n.node_type,
             NodeType::VstPlugin {

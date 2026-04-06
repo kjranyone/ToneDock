@@ -759,9 +759,9 @@ fn migrate_legacy_session(legacy: LegacySession) -> Session {
 - [x] Splitter / Mixer ノードの実装
 - [x] Pan ノードの実装（等パワーパンニング）
 - [x] 自動チャンネル変換（Mono↔Stereo 暗黙変換）
-- [ ] Send/Return バス（将来的）
-- [ ] Wet/Dry ノード（ミックス比制御）
-- [ ] パラレルチェーンのテンプレート
+- [x] Send/Return バス（SendBus / ReturnBus ノード）
+- [x] Wet/Dry ノード（ミックス比制御）
+- [x] パラレルチェーンのテンプレート
 
 ---
 

@@ -807,6 +807,9 @@ impl AudioEngine {
             new_graph.set_node_enabled(new_id, sn.enabled);
             new_graph.set_node_bypassed(new_id, sn.bypassed);
             new_graph.set_node_position(new_id, sn.position.0, sn.position.1);
+            if !matches!(sn.internal_state, NodeInternalState::None) {
+                new_graph.set_node_internal_state(new_id, sn.internal_state.clone());
+            }
         }
 
         for conn in &data.connections {
