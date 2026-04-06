@@ -1,6 +1,6 @@
 # ToneDock — Handover資料
 
-最終更新: 2026-04-06 08:05 JST
+最終更新: 2026-04-06 10:07 JST
 
 ## プロジェクト概要
 
@@ -149,21 +149,49 @@ src/
 | Phase | 内容 | 状態 |
 |-------|------|------|
 | 2-3 | ダブルバッファ戦略（arc_swap、ロックフリー処理） | ✅ 完了 |
-| 2-4 | Looper/Metronome のノード化 | 未着手 |
+| 2-4 | Looper/Metronome のノード化 | ✅ 完了 |
 | 2-5 | 後方互換セッション読み込み | 未着手 |
 | Phase 3 | ノードエディタUI | 未着手 |
 | Phase 4 | 高度なルーティング（Send/Return、Wet/Dry） | 未着手 |
 
-## 次にやること（Phase 2-4: Looper/Metronome のノード化）
+### Phase 2-4: Looper/Metronome のノード化 ✅ 完了
 
-- 現在のスタンドアローン `Looper`/`Metronome` を AudioGraph 内のノードに統合
-- 既存のUI制御（app.rs）をグラフノード経由に更新
-- メトロノームノード: BPM/Volume を `NodeInternalState` 経由で制御、`process_metronome_node()` は既に実装済み
-- ルーパーノード: Rec/Play/Overdub/Clear を `NodeInternalState` 経由で制御、現在はパススルー（本格実装が必要）
+**src/audio/graph.rs 変更点**:
+- `GraphNode` に `looper_buffer: Mutex<Option<LooperBuffer>>` フィールドを追加
+  - `LooperBuffer` — リングバッファ（record/overdub/read_and_advance/clear）
+  - `parking_lot::Mutex` で内部可変性、`clone_empty()` は空バッファを生成
+- `GraphNode` に `metronome_phase: Mutex<f64>`, `metronome_click_remaining: Mutex<usize>` を追加
+- `process_metronome_node()` — フェーズ状態を `GraphNode` フィールドに保持（ブロック間で連続性を維持）
+- `process_looper_node()` — 本格実装: recording/playback/overdub の3モード対応
+  - recording: 入力をリングバッファに記録 + パススルー出力
+  - playing: リングバッファから再生（playback_pos 自動更新）
+  - overdub: 再生中に入力をバッファに加算
+- `AudioGraph` にヘルパーメソッド追加: `looper_loop_length()`, `clear_looper()`, `init_looper_buffer()`
 
-### 2-5: 後方互換セッション読み込み
+**src/audio/node.rs 変更点**:
+- `LooperNodeState` に `cleared: bool` フィールドを追加（clear コマンド伝達用）
+
+**src/audio/engine.rs 変更点**:
+- `AudioEngine` に `metronome_node_id: Option<NodeId>`, `looper_node_id: Option<NodeId>` を追加
+- `add_metronome_node()` / `add_looper_node()` — グラフにノードを追加しIDをキャッシュ
+- `apply_command()` — `LooperNodeState.cleared == true` の場合 `clear_looper()` を呼び出し
+
+**src/app.rs 変更点**:
+- UI制御をスタンドアローン `Metronome`/`Looper` からグラフノード経由に完全移行
+- メトロノーム: `graph_set_state()` で BPM/Volume を `MetronomeNodeState` に設定
+- ルーパー: `graph_set_state()` で enabled/recording/playing/overdubbing/cleared を制御
+- `graph_set_enabled()` + `graph_commit_topology()` でノードの有効/無効を管理
+- ループ長表示: `graph.load().looper_loop_length()` から取得
+
+## 次にやること（Phase 2-5: 後方互換セッション読み込み）
+
 - 旧 `Vec<ChainSlot>` 形式のセッションを AudioGraph 形式に自動変換
 - `migrate_legacy_session()` を実装
+
+### Phase 3: ノードエディタUI
+- ノードグラフの可視化エディタ
+- ドラッグ&ドロップでノード間接続
+- ノードの追加/削除UI
 
 ## 技術的メモ
 

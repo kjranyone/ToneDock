@@ -212,6 +212,7 @@ pub struct LooperNodeState {
     pub recording: bool,
     pub playing: bool,
     pub overdubbing: bool,
+    pub cleared: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

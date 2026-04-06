@@ -2,6 +2,7 @@ use eframe::App;
 use egui::*;
 
 use crate::audio::engine::AudioEngine;
+use crate::audio::node::{LooperNodeState, MetronomeNodeState, NodeId, NodeInternalState};
 use crate::session::Session;
 use crate::ui::preferences::{PreferencesResult, PreferencesState};
 use crate::ui::rack_view::RackView;
@@ -17,11 +18,13 @@ pub struct ToneDockApp {
     metronome_enabled: bool,
     metronome_bpm: f64,
     metronome_volume: f32,
+    metronome_node_id: Option<NodeId>,
 
     looper_enabled: bool,
     looper_recording: bool,
     looper_playing: bool,
     looper_overdubbing: bool,
+    looper_node_id: Option<NodeId>,
 
     selected_chain_slot: Option<usize>,
     show_about: bool,
@@ -52,10 +55,12 @@ impl ToneDockApp {
             metronome_enabled: false,
             metronome_bpm: 120.0,
             metronome_volume: 0.5,
+            metronome_node_id: None,
             looper_enabled: false,
             looper_recording: false,
             looper_playing: false,
             looper_overdubbing: false,
+            looper_node_id: None,
             selected_chain_slot: None,
             show_about: false,
             status_message: "Ready".into(),
@@ -126,8 +131,6 @@ impl ToneDockApp {
             log::error!("Audio start failed: {}", e);
         } else {
             self.status_message = "Audio running".into();
-            let sr = self.audio_engine.sample_rate;
-            self.audio_engine.metronome.lock().set_sample_rate(sr);
         }
     }
 
@@ -282,7 +285,21 @@ impl App for ToneDockApp {
 
                 if crate::ui::controls::draw_toggle(ui, "", self.metronome_enabled, 14.0) {
                     self.metronome_enabled = !self.metronome_enabled;
-                    self.audio_engine.metronome.lock().enabled = self.metronome_enabled;
+                    if self.metronome_node_id.is_none() && self.metronome_enabled {
+                        self.metronome_node_id = Some(self.audio_engine.add_metronome_node());
+                    }
+                    if let Some(id) = self.metronome_node_id {
+                        self.audio_engine.graph_set_state(
+                            id,
+                            NodeInternalState::Metronome(MetronomeNodeState {
+                                bpm: self.metronome_bpm,
+                                volume: self.metronome_volume,
+                            }),
+                        );
+                        self.audio_engine
+                            .graph_set_enabled(id, self.metronome_enabled);
+                        self.audio_engine.graph_commit_topology();
+                    }
                 }
 
                 ui.label("BPM:");
@@ -294,7 +311,15 @@ impl App for ToneDockApp {
                 );
                 if (bpm - self.metronome_bpm).abs() > 0.01 {
                     self.metronome_bpm = bpm;
-                    self.audio_engine.metronome.lock().set_bpm(bpm);
+                    if let Some(id) = self.metronome_node_id {
+                        self.audio_engine.graph_set_state(
+                            id,
+                            NodeInternalState::Metronome(MetronomeNodeState {
+                                bpm,
+                                volume: self.metronome_volume,
+                            }),
+                        );
+                    }
                 }
 
                 ui.label("Vol:");
@@ -302,7 +327,15 @@ impl App for ToneDockApp {
                 ui.add(egui::Slider::new(&mut vol, 0.0..=1.0));
                 if (vol - self.metronome_volume).abs() > 0.001 {
                     self.metronome_volume = vol;
-                    self.audio_engine.metronome.lock().volume = vol;
+                    if let Some(id) = self.metronome_node_id {
+                        self.audio_engine.graph_set_state(
+                            id,
+                            NodeInternalState::Metronome(MetronomeNodeState {
+                                bpm: self.metronome_bpm,
+                                volume: vol,
+                            }),
+                        );
+                    }
                 }
 
                 ui.separator();
@@ -315,12 +348,39 @@ impl App for ToneDockApp {
 
                 if crate::ui::controls::draw_toggle(ui, "", self.looper_enabled, 14.0) {
                     self.looper_enabled = !self.looper_enabled;
-                    self.audio_engine.looper.lock().enabled = self.looper_enabled;
+                    if self.looper_node_id.is_none() && self.looper_enabled {
+                        self.looper_node_id = Some(self.audio_engine.add_looper_node());
+                    }
+                    if let Some(id) = self.looper_node_id {
+                        self.audio_engine.graph_set_state(
+                            id,
+                            NodeInternalState::Looper(LooperNodeState {
+                                enabled: self.looper_enabled,
+                                recording: false,
+                                playing: false,
+                                overdubbing: false,
+                                cleared: false,
+                            }),
+                        );
+                        self.audio_engine.graph_set_enabled(id, self.looper_enabled);
+                        self.audio_engine.graph_commit_topology();
+                    }
                     if !self.looper_enabled {
                         self.looper_recording = false;
                         self.looper_playing = false;
                         self.looper_overdubbing = false;
-                        self.audio_engine.looper.lock().clear();
+                        if let Some(id) = self.looper_node_id {
+                            self.audio_engine.graph_set_state(
+                                id,
+                                NodeInternalState::Looper(LooperNodeState {
+                                    enabled: false,
+                                    recording: false,
+                                    playing: false,
+                                    overdubbing: false,
+                                    cleared: true,
+                                }),
+                            );
+                        }
                     }
                 }
 
@@ -331,12 +391,26 @@ impl App for ToneDockApp {
                 };
                 ui.style_mut().visuals.override_text_color = Some(rec_color);
                 if ui.button("Rec").clicked() {
-                    let mut lpr = self.audio_engine.looper.lock();
+                    if self.looper_node_id.is_none() {
+                        self.looper_node_id = Some(self.audio_engine.add_looper_node());
+                    }
                     self.looper_enabled = true;
-                    lpr.enabled = true;
-                    lpr.toggle_record();
-                    self.looper_recording = lpr.recording;
-                    self.looper_playing = lpr.playing;
+                    self.looper_recording = !self.looper_recording;
+                    self.looper_playing = if self.looper_recording { false } else { true };
+                    if let Some(id) = self.looper_node_id {
+                        self.audio_engine.graph_set_state(
+                            id,
+                            NodeInternalState::Looper(LooperNodeState {
+                                enabled: true,
+                                recording: self.looper_recording,
+                                playing: self.looper_playing,
+                                overdubbing: false,
+                                cleared: false,
+                            }),
+                        );
+                        self.audio_engine.graph_set_enabled(id, true);
+                        self.audio_engine.graph_commit_topology();
+                    }
                 }
                 ui.style_mut().visuals.override_text_color = Some(crate::ui::theme::TEXT_PRIMARY);
 
@@ -347,12 +421,25 @@ impl App for ToneDockApp {
                 };
                 ui.style_mut().visuals.override_text_color = Some(play_color);
                 if ui.button("Play").clicked() {
-                    let mut lpr = self.audio_engine.looper.lock();
-                    self.looper_enabled = true;
-                    lpr.enabled = true;
-                    lpr.toggle_play();
-                    self.looper_playing = lpr.playing;
-                    self.looper_recording = lpr.recording;
+                    if self.looper_node_id.is_none() {
+                        self.looper_node_id = Some(self.audio_engine.add_looper_node());
+                    }
+                    self.looper_playing = !self.looper_playing;
+                    self.looper_recording = false;
+                    if let Some(id) = self.looper_node_id {
+                        self.audio_engine.graph_set_state(
+                            id,
+                            NodeInternalState::Looper(LooperNodeState {
+                                enabled: true,
+                                recording: false,
+                                playing: self.looper_playing,
+                                overdubbing: self.looper_overdubbing,
+                                cleared: false,
+                            }),
+                        );
+                        self.audio_engine.graph_set_enabled(id, true);
+                        self.audio_engine.graph_commit_topology();
+                    }
                 }
                 ui.style_mut().visuals.override_text_color = Some(crate::ui::theme::TEXT_PRIMARY);
 
@@ -363,29 +450,59 @@ impl App for ToneDockApp {
                 };
                 ui.style_mut().visuals.override_text_color = Some(od_color);
                 if ui.button("Overdub").clicked() {
-                    let mut lpr = self.audio_engine.looper.lock();
-                    lpr.toggle_overdub();
-                    self.looper_overdubbing = lpr.overdubbing;
+                    self.looper_overdubbing = if self.looper_overdubbing {
+                        false
+                    } else if self.looper_playing {
+                        true
+                    } else {
+                        false
+                    };
+                    if let Some(id) = self.looper_node_id {
+                        self.audio_engine.graph_set_state(
+                            id,
+                            NodeInternalState::Looper(LooperNodeState {
+                                enabled: true,
+                                recording: self.looper_recording,
+                                playing: self.looper_playing,
+                                overdubbing: self.looper_overdubbing,
+                                cleared: false,
+                            }),
+                        );
+                    }
                 }
                 ui.style_mut().visuals.override_text_color = Some(crate::ui::theme::TEXT_PRIMARY);
 
                 if ui.button("Clear").clicked() {
-                    let mut lpr = self.audio_engine.looper.lock();
-                    lpr.clear();
                     self.looper_recording = false;
                     self.looper_playing = false;
                     self.looper_overdubbing = false;
+                    if let Some(id) = self.looper_node_id {
+                        self.audio_engine.graph_set_state(
+                            id,
+                            NodeInternalState::Looper(LooperNodeState {
+                                enabled: false,
+                                recording: false,
+                                playing: false,
+                                overdubbing: false,
+                                cleared: true,
+                            }),
+                        );
+                    }
                 }
 
-                let loop_samples = self.audio_engine.looper.lock().loop_length_samples();
-                if loop_samples > 0 {
-                    let sr = self.audio_engine.sample_rate;
-                    let secs = loop_samples as f64 / sr;
-                    ui.label(
-                        RichText::new(format!("{:.1}s", secs))
-                            .size(10.0)
-                            .color(crate::ui::theme::TEXT_SECONDARY),
-                    );
+                if let Some(id) = self.looper_node_id {
+                    let guard = self.audio_engine.graph.load();
+                    let loop_samples = guard.looper_loop_length(id);
+                    drop(guard);
+                    if loop_samples > 0 {
+                        let sr = self.audio_engine.sample_rate;
+                        let secs = loop_samples as f64 / sr;
+                        ui.label(
+                            RichText::new(format!("{:.1}s", secs))
+                                .size(10.0)
+                                .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+                    }
                 }
             });
         });
@@ -529,8 +646,6 @@ impl App for ToneDockApp {
                             self.status_message = format!("Audio restart error: {}", e);
                             log::error!("Audio restart failed: {}", e);
                         } else {
-                            let new_sr = self.audio_engine.sample_rate;
-                            self.audio_engine.metronome.lock().set_sample_rate(new_sr);
                             self.status_message = format!(
                                 "Audio: {}Hz, buffer {}",
                                 self.audio_engine.sample_rate as u32, self.audio_engine.buffer_size,

@@ -35,6 +35,85 @@ impl std::fmt::Display for GraphError {
 
 impl std::error::Error for GraphError {}
 
+struct LooperBuffer {
+    data: Vec<Vec<f32>>,
+    channels: usize,
+    capacity: usize,
+    write_pos: usize,
+    len: usize,
+    playback_pos: usize,
+}
+
+impl LooperBuffer {
+    fn new(channels: usize, sample_rate: f64, max_seconds: f64) -> Self {
+        let capacity = (sample_rate * max_seconds) as usize;
+        let data = vec![vec![0.0f32; capacity]; channels];
+        Self {
+            data,
+            channels,
+            capacity,
+            write_pos: 0,
+            len: 0,
+            playback_pos: 0,
+        }
+    }
+
+    fn record(&mut self, input: &[Vec<f32>], num_frames: usize) {
+        for frame in 0..num_frames {
+            for ch in 0..self.channels.min(input.len()) {
+                if self.write_pos < self.capacity {
+                    self.data[ch][self.write_pos] = input[ch].get(frame).copied().unwrap_or(0.0);
+                }
+            }
+            self.write_pos = (self.write_pos + 1) % self.capacity;
+            if self.len < self.capacity {
+                self.len += 1;
+            }
+        }
+    }
+
+    fn overdub(&mut self, input: &[Vec<f32>], num_frames: usize) {
+        if self.len == 0 {
+            return;
+        }
+        for frame in 0..num_frames {
+            let p = (self.playback_pos + frame) % self.len;
+            for ch in 0..self.channels.min(input.len()) {
+                let inp = input[ch].get(frame).copied().unwrap_or(0.0);
+                self.data[ch][p] += inp;
+            }
+        }
+    }
+
+    fn read_and_advance(&mut self, output: &mut [Vec<f32>], num_frames: usize) {
+        if self.len == 0 {
+            return;
+        }
+        for frame in 0..num_frames {
+            let p = self.playback_pos % self.len;
+            for ch in 0..self.channels.min(output.len()) {
+                if frame < output[ch].len() {
+                    output[ch][frame] += self.data[ch][p];
+                }
+            }
+            self.playback_pos = (self.playback_pos + 1) % self.len;
+        }
+    }
+
+    fn clear(&mut self) {
+        for ch in &mut self.data {
+            ch.fill(0.0);
+        }
+        self.write_pos = 0;
+        self.len = 0;
+        self.playback_pos = 0;
+    }
+
+    fn clone_empty(&self) -> Self {
+        Self::new(self.channels, 48000.0, 120.0)
+    }
+}
+
 pub struct GraphNode {
     pub id: NodeId,
     pub node_type: NodeType,
@@ -49,10 +128,19 @@ pub struct GraphNode {
 
     pub plugin_instance: Mutex<Option<LoadedPlugin>>,
     pub internal_state: NodeInternalState,
+
+    looper_buffer: Mutex<Option<LooperBuffer>>,
+    metronome_phase: Mutex<f64>,
+    metronome_click_remaining: Mutex<usize>,
 }
 
 impl Clone for GraphNode {
     fn clone(&self) -> Self {
+        let looper_clone = if let Some(ref buf) = *self.looper_buffer.lock() {
+            Some(buf.clone_empty())
+        } else {
+            None
+        };
         Self {
             id: self.id,
             node_type: self.node_type.clone(),
@@ -65,6 +153,9 @@ impl Clone for GraphNode {
             output_buffers: Mutex::new(self.output_buffers.lock().clone()),
             plugin_instance: Mutex::new(None),
             internal_state: self.internal_state.clone(),
+            looper_buffer: Mutex::new(looper_clone),
+            metronome_phase: Mutex::new(*self.metronome_phase.lock()),
+            metronome_click_remaining: Mutex::new(*self.metronome_click_remaining.lock()),
         }
     }
 }
@@ -91,10 +182,19 @@ impl GraphNode {
                 recording: false,
                 playing: false,
                 overdubbing: false,
+                cleared: false,
             }),
             NodeType::Gain => NodeInternalState::Gain { value: 1.0 },
             NodeType::Pan => NodeInternalState::Pan { value: 0.0 },
             _ => NodeInternalState::None,
+        };
+
+        let looper_buffer = if matches!(node_type, NodeType::Looper) {
+            let out_port = output_ports.first();
+            let ch = out_port.map(|p| p.channels.channel_count()).unwrap_or(2);
+            Mutex::new(Some(LooperBuffer::new(ch, 48000.0, 120.0)))
+        } else {
+            Mutex::new(None)
         };
 
         Self {
@@ -109,6 +209,9 @@ impl GraphNode {
             output_buffers: Mutex::new(output_buffers),
             plugin_instance: Mutex::new(None),
             internal_state,
+            looper_buffer,
+            metronome_phase: Mutex::new(0.0),
+            metronome_click_remaining: Mutex::new(0),
         }
     }
 
@@ -857,21 +960,21 @@ impl AudioGraph {
 
         let node = self.nodes.get(&node_id).unwrap();
         let mut output_buffers = node.output_buffers.lock();
+        let mut phase = node.metronome_phase.lock();
+        let mut click_remaining = node.metronome_click_remaining.lock();
 
         if let Some(out_buf) = output_buffers.get_mut(0) {
             if out_buf.is_empty() {
                 return;
             }
             let ch_count = out_buf.len();
-            let mut phase: f64 = 0.0;
-            let mut click_remaining: usize = 0;
 
             for frame in 0..num_frames {
-                let sample = if click_remaining > 0 {
-                    let t = (click_duration - click_remaining) as f64;
+                let sample = if *click_remaining > 0 {
+                    let t = (click_duration - *click_remaining) as f64;
                     let val = (2.0 * std::f64::consts::PI * click_freq * t / sample_rate).sin()
-                        * (click_remaining as f64 / click_duration as f64);
-                    click_remaining -= 1;
+                        * (*click_remaining as f64 / click_duration as f64);
+                    *click_remaining -= 1;
                     val as f32 * volume
                 } else {
                     0.0
@@ -883,16 +986,28 @@ impl AudioGraph {
                     }
                 }
 
-                phase += 1.0;
-                if phase >= samples_per_beat {
-                    phase -= samples_per_beat;
-                    click_remaining = click_duration;
+                *phase += 1.0;
+                if *phase >= samples_per_beat {
+                    *phase -= samples_per_beat;
+                    *click_remaining = click_duration;
                 }
             }
         }
     }
 
     fn process_looper_node(&self, node_id: NodeId, num_frames: usize) {
+        let state: super::node::LooperNodeState = {
+            let node = self.nodes.get(&node_id).unwrap();
+            match &node.internal_state {
+                NodeInternalState::Looper(s) => s.clone(),
+                _ => return,
+            }
+        };
+
+        if !state.enabled {
+            return;
+        }
+
         let input_data: Option<Vec<Vec<f32>>> = {
             let node = self.nodes.get(&node_id).unwrap();
             let input_buffers = node.input_buffers.lock();
@@ -901,12 +1016,46 @@ impl AudioGraph {
 
         let node = self.nodes.get(&node_id).unwrap();
         let mut output_buffers = node.output_buffers.lock();
-        if let Some(input_buf) = input_data {
+
+        if state.recording {
+            if let Some(ref input_buf) = input_data {
+                let mut looper = node.looper_buffer.lock();
+                if let Some(ref mut buf) = *looper {
+                    buf.record(input_buf, num_frames);
+                }
+            }
+        }
+
+        if state.playing {
+            let mut looper = node.looper_buffer.lock();
+            if let Some(ref mut buf) = *looper {
+                if let Some(out_buf) = output_buffers.get_mut(0) {
+                    let ch_count = out_buf.len();
+                    let mut temp_out = vec![vec![0.0f32; num_frames]; ch_count];
+                    buf.read_and_advance(&mut temp_out, num_frames);
+                    for ch in 0..ch_count {
+                        let len = num_frames.min(out_buf[ch].len()).min(temp_out[ch].len());
+                        for i in 0..len {
+                            out_buf[ch][i] += temp_out[ch][i];
+                        }
+                    }
+                }
+            }
+        } else if let Some(ref input_buf) = input_data {
             if let Some(out_buf) = output_buffers.get_mut(0) {
                 let ch_count = input_buf.len().min(out_buf.len());
                 for ch in 0..ch_count {
                     let len = num_frames.min(input_buf[ch].len()).min(out_buf[ch].len());
                     out_buf[ch][..len].copy_from_slice(&input_buf[ch][..len]);
+                }
+            }
+        }
+
+        if state.overdubbing {
+            if let Some(ref input_buf) = input_data {
+                let mut looper = node.looper_buffer.lock();
+                if let Some(ref mut buf) = *looper {
+                    buf.overdub(input_buf, num_frames);
                 }
             }
         }
@@ -1069,6 +1218,52 @@ impl AudioGraph {
 
     pub fn max_frames(&self) -> usize {
         self.max_frames
+    }
+
+    pub fn looper_loop_length(&self, node_id: NodeId) -> usize {
+        let node = match self.nodes.get(&node_id) {
+            Some(n) => n,
+            None => return 0,
+        };
+        let looper = node.looper_buffer.lock();
+        match *looper {
+            Some(ref buf) => buf.len,
+            None => 0,
+        }
+    }
+
+    pub fn clear_looper(&mut self, node_id: NodeId) {
+        if let Some(node) = self.nodes.get(&node_id) {
+            let mut looper = node.looper_buffer.lock();
+            if let Some(ref mut buf) = *looper {
+                buf.clear();
+            }
+        }
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.internal_state = NodeInternalState::Looper(super::node::LooperNodeState {
+                enabled: false,
+                recording: false,
+                playing: false,
+                overdubbing: false,
+                cleared: false,
+            });
+        }
+    }
+
+    pub fn init_looper_buffer(&mut self, node_id: NodeId) {
+        let sample_rate = self.sample_rate;
+        let ch = if let Some(node) = self.nodes.get(&node_id) {
+            node.output_ports
+                .first()
+                .map(|p| p.channels.channel_count())
+                .unwrap_or(2)
+        } else {
+            return;
+        };
+        if let Some(node) = self.nodes.get(&node_id) {
+            let mut looper = node.looper_buffer.lock();
+            *looper = Some(LooperBuffer::new(ch, sample_rate, 120.0));
+        }
     }
 }
 

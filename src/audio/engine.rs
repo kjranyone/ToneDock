@@ -47,6 +47,9 @@ pub struct AudioEngine {
     pub input_node_id: NodeId,
     pub output_node_id: NodeId,
 
+    pub metronome_node_id: Option<NodeId>,
+    pub looper_node_id: Option<NodeId>,
+
     stream: Option<Stream>,
     input_stream: Option<Stream>,
     host_id: Option<HostId>,
@@ -76,6 +79,12 @@ fn apply_command(graph: &mut AudioGraph, cmd: GraphCommand) {
         }
         GraphCommand::SetNodeState(id, state) => {
             if let Some(node) = graph.get_node_mut(id) {
+                if let NodeInternalState::Looper(ref looper_state) = state {
+                    if looper_state.cleared {
+                        graph.clear_looper(id);
+                        return;
+                    }
+                }
                 node.internal_state = state;
             }
         }
@@ -251,6 +260,8 @@ impl AudioEngine {
             chain_node_ids: Vec::new(),
             input_node_id: input_id,
             output_node_id: output_id,
+            metronome_node_id: None,
+            looper_node_id: None,
         })
     }
 
@@ -712,5 +723,50 @@ impl AudioEngine {
 
     pub fn graph_send_command(&self, cmd: GraphCommand) {
         self.send_command(cmd);
+    }
+
+    pub fn add_metronome_node(&mut self) -> NodeId {
+        if let Some(id) = self.metronome_node_id {
+            return id;
+        }
+        self.graph_add_node(NodeType::Metronome);
+        self.apply_commands_to_staging();
+        let id = self.find_node_id_by_type(NodeType::Metronome);
+        if let Some(id) = id {
+            self.metronome_node_id = Some(id);
+            return id;
+        }
+        NodeId(0)
+    }
+
+    pub fn add_looper_node(&mut self) -> NodeId {
+        if let Some(id) = self.looper_node_id {
+            return id;
+        }
+        self.graph_add_node(NodeType::Looper);
+        self.apply_commands_to_staging();
+        let id = self.find_node_id_by_type(NodeType::Looper);
+        if let Some(id) = id {
+            {
+                let guard = self.graph.load();
+                let mut staging = (**guard).clone();
+                drop(guard);
+                staging.init_looper_buffer(id);
+                self.graph.store(Arc::new(staging));
+            }
+            self.looper_node_id = Some(id);
+            return id;
+        }
+        NodeId(0)
+    }
+
+    fn find_node_id_by_type(&self, target: NodeType) -> Option<NodeId> {
+        let guard = self.graph.load();
+        for (&id, node) in guard.nodes() {
+            if std::mem::discriminant(&node.node_type) == std::mem::discriminant(&target) {
+                return Some(id);
+            }
+        }
+        None
     }
 }
