@@ -1,6 +1,6 @@
 # ToneDock — Handover資料
 
-最終更新: 2026-04-06 08:03 JST
+最終更新: 2026-04-06 08:05 JST
 
 ## プロジェクト概要
 
@@ -9,6 +9,7 @@
 - リポジトリ: `C:\lib\github\kjranyone\ToneDock`
 - `cargo check` **通ります** / `cargo test` **13テスト全パス**
 - 設計書: `docs/node_based_routing_design.md`
+- 新依存: `arc-swap = "1"` （Phase 2-3で追加）
 
 ## 現在のアーキテクチャ
 
@@ -25,7 +26,8 @@ src/
 │   ├── engine.rs         — cpalオーディオエンジン（AudioGraph + Chain併用）
 │   ├── node.rs           — ノード型定義（NodeId, NodeType, Port, etc.）
 │   ├── graph.rs          — AudioGraph（DAG処理、トポロジカルソート、バッファ管理）
-│   └── graph_command.rs  — **[新規]** UI→Audioスレッド間コマンドキュー
+│   │                       [Phase 2-3] Mutex内部可変性で&selfプロセス対応、Clone実装
+│   └── graph_command.rs  — UI→Audioスレッド間コマンドキュー
 ├── ui/
 │   ├── mod.rs
 │   ├── theme.rs          — ダークテーマ色定数
@@ -101,11 +103,31 @@ src/
   - `graph_set_enabled()`, `graph_set_bypassed()`, `graph_set_state()`
   - `graph_commit_topology()`, `graph_send_command()`
 - `send_command()` — 内部送信（エラーログ付き）
-- `drain_pending_commands()` — UIスレッドからの手動ドレイン用
+- `apply_commands_to_staging()` — UIスレッドからの手動適用（ロック不要）
 
-**設計上の注意点**:
-- `AddNode` は非同期のため、生成された `NodeId` はUI側に返らない。Phase 3 で `AddNodeWithId(NodeId, NodeType)` またはレスポンスチャンネルの追加が必要
-- `drain_pending_commands()` は `graph.lock()` を取得するため、オーディオスレッドとのロック競合に注意（Phase 2-3 のダブルバッファで解決予定）
+### Phase 2-3: ダブルバッファ戦略（ArcSwap） ✅ 完了
+
+**設計概要**:
+- `engine.rs` の `graph` フィールド: `Arc<Mutex<AudioGraph>>` → `Arc<ArcSwap<AudioGraph>>`
+- UIスレッド: グラフをクローン → コマンド適用 → `arc_swap.store()` でアトミックスワップ
+- オーディオスレッド: `arc_swap.load()` で不変参照取得 → `&self` で process（ロック不要）
+
+**src/audio/graph.rs 変更点**:
+- `GraphNode` のバッファフィールド（`input_buffers`, `output_buffers`, `plugin_instance`）を `parking_lot::Mutex` でラップ
+  - `parking_lot::Mutex` は `Sync` を実装するため、`ArcSwap` 経由でスレッド間共有可能
+- `process()` のシグネチャ: `&mut self` → `&self`（すべての内部バッファ操作を `Mutex::lock()` 経由に変更）
+- `AudioGraph`, `GraphNode` に `Clone` を実装
+  - `GraphNode::clone()` では `plugin_instance` は `None` に設定（プラグインは再ロードが必要）
+- `process_internal()` は `topology_dirty` 時は即時リターン（オーディオスレッド側ではコミットしない設計）
+
+**engine.rs オーディオコールバックの処理フロー**:
+1. `cmd_rx` から保留コマンドを一括取得
+2. コマンドがある場合: `graph.load()` → `clone()` → コマンド適用 → `graph.store(Arc::new(staging))`
+3. `graph.load()` → `guard.process(&input, num_frames)` で処理（ロックフリー）
+
+**engine.rs UI側のAPI**:
+- `apply_commands_to_staging()` — UIスレッドからコマンドを直接適用してスワップ（ストリーム停止時などに使用）
+- 旧 `drain_pending_commands()` は削除（ロック競合の原因を根本解消）
 
 ### テスト結果（13テスト全パス）
 - `test_add_audio_input_output` — シングルトンノードの追加
@@ -126,22 +148,18 @@ src/
 
 | Phase | 内容 | 状態 |
 |-------|------|------|
-| 2-3 | ダブルバッファ戦略（arc_swap、ロックフリー処理） | 未着手 |
+| 2-3 | ダブルバッファ戦略（arc_swap、ロックフリー処理） | ✅ 完了 |
 | 2-4 | Looper/Metronome のノード化 | 未着手 |
 | 2-5 | 後方互換セッション読み込み | 未着手 |
 | Phase 3 | ノードエディタUI | 未着手 |
 | Phase 4 | 高度なルーティング（Send/Return、Wet/Dry） | 未着手 |
 
-## 次にやること（Phase 2-3: ダブルバッファ戦略）
+## 次にやること（Phase 2-4: Looper/Metronome のノード化）
 
-- UIスレッドでグラフ構造をクローン→変更→トポロジ計算
-- `arc_swap` クレートでアトミックにスワップ
-- オーディオスレッドは不変参照で処理（ロック不要化）
-- `drain_pending_commands()` のロック競合問題を解消
-
-### 2-4: Looper/Metronome のノード化
 - 現在のスタンドアローン `Looper`/`Metronome` を AudioGraph 内のノードに統合
 - 既存のUI制御（app.rs）をグラフノード経由に更新
+- メトロノームノード: BPM/Volume を `NodeInternalState` 経由で制御、`process_metronome_node()` は既に実装済み
+- ルーパーノード: Rec/Play/Overdub/Clear を `NodeInternalState` 経由で制御、現在はパススルー（本格実装が必要）
 
 ### 2-5: 後方互換セッション読み込み
 - 旧 `Vec<ChainSlot>` 形式のセッションを AudioGraph 形式に自動変換
@@ -153,17 +171,31 @@ src/
 - `ref` パターンは暗黙借用の対象になるため `if let Some(Some(ref x))` → `if let Some(Some(x))` にする必要がある
 - `split_at_mut()` を使って `&mut Vec` の要素間で同時借用可能にする
 
-### バッファ戦略
-- `gather_inputs()` で `clone()` を多用している（将来的に最適化可能）
+### バッファ戦略（Phase 2-3 更新）
+- `GraphNode` のバッファは `parking_lot::Mutex` で内部可変性を実現
+- `AudioGraph::process()` は `&self` で動作 → `ArcSwap` 経由でロックフリーにアクセス可能
+- オーディオスレッド: `graph.load()` → `Guard` (不変参照) → `&self::process()`
+- UIスレッド: `graph.load()` → `clone()` → `apply_command()` → `graph.store(Arc::new(new_graph))`
+- `gather_inputs()` での `clone()` は `Mutex` ロック内で実行（オーディオスレッドのみがアクセスするため実質競合なし）
 - ゼロコピースプリッターの実装は Phase 4 で検討
 - `max_frames` はデフォルト 256、バッファサイズ変更時に全ノードのリサイズが必要
+
+### ArcSwap 設計（Phase 2-3）
+- `ArcSwap<AudioGraph>` = `ArcSwapAny<Arc<AudioGraph>>`
+- `from_pointee(val)` → `Arc::new(val)` を内部でラップ
+- `store(Arc<AudioGraph>)` → アトミックにスワップ（旧ポインタは自動解放）
+- `load()` → `Guard<Arc<AudioGraph>>` を返す（`Deref<Target=Arc<AudioGraph>>` → `Deref<Target=AudioGraph>`）
+- `**guard` で `AudioGraph` にアクセス、`(**guard).clone()` でディープコピー
+- `GraphNode::clone()` は `plugin_instance` を `None` に設定（プラグインは `Arc` で共有不可）
 
 ### Mono-In / Stereo-Out 原則
 - AudioInput: 常に 1ch (Mono)
 - AudioOutput: 常に 2ch (Stereo)
 - 自動チャンネル変換は `connect()` 時に許可し、`gather_inputs()` で実行
 
-### Command Queue 設計
+### Command Queue 設計（Phase 2-3 更新）
 - `crossbeam_channel` は unbounded（キュー溢れなし）
 - オーディオスレッド側で `try_recv()` ループにより全コマンドを1ブロック内で処理
-- UI→Audio 方向のみ（Audio→UI のフィードバックは未実装、Phase 3 で検討）
+- コマンド処理フロー: clone → apply → store（1ブロック内で完結）
+- 旧 `drain_pending_commands()` は削除 → `apply_commands_to_staging()` に置き換え
+- `apply_commands_to_staging()` はUIスレッドから呼び出し可能（`ArcSwap` のためロック競合なし）

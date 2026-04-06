@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::vst_host::plugin::LoadedPlugin;
@@ -43,11 +44,29 @@ pub struct GraphNode {
     pub bypassed: bool,
     pub position: (f32, f32),
 
-    pub input_buffers: Vec<Option<Vec<Vec<f32>>>>,
-    pub output_buffers: Vec<Vec<Vec<f32>>>,
+    pub input_buffers: Mutex<Vec<Option<Vec<Vec<f32>>>>>,
+    pub output_buffers: Mutex<Vec<Vec<Vec<f32>>>>,
 
-    pub plugin_instance: Option<LoadedPlugin>,
+    pub plugin_instance: Mutex<Option<LoadedPlugin>>,
     pub internal_state: NodeInternalState,
+}
+
+impl Clone for GraphNode {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            node_type: self.node_type.clone(),
+            input_ports: self.input_ports.clone(),
+            output_ports: self.output_ports.clone(),
+            enabled: self.enabled,
+            bypassed: self.bypassed,
+            position: self.position,
+            input_buffers: Mutex::new(self.input_buffers.lock().clone()),
+            output_buffers: Mutex::new(self.output_buffers.lock().clone()),
+            plugin_instance: Mutex::new(None),
+            internal_state: self.internal_state.clone(),
+        }
+    }
 }
 
 impl GraphNode {
@@ -86,24 +105,26 @@ impl GraphNode {
             enabled: true,
             bypassed: false,
             position: (0.0, 0.0),
-            input_buffers,
-            output_buffers,
-            plugin_instance: None,
+            input_buffers: Mutex::new(input_buffers),
+            output_buffers: Mutex::new(output_buffers),
+            plugin_instance: Mutex::new(None),
             internal_state,
         }
     }
 
-    pub fn resize_buffers(&mut self, max_frames: usize) {
+    pub fn resize_buffers(&self, max_frames: usize) {
+        let mut output_buffers = self.output_buffers.lock();
         for (i, port) in self.output_ports.iter().enumerate() {
             let ch_count = port.channels.channel_count();
-            if let Some(buf) = self.output_buffers.get_mut(i) {
+            if let Some(buf) = output_buffers.get_mut(i) {
                 buf.resize(ch_count, vec![0.0f32; max_frames]);
                 for ch in buf.iter_mut() {
                     ch.resize(max_frames, 0.0);
                 }
             }
         }
-        for opt_buf in &mut self.input_buffers {
+        let mut input_buffers = self.input_buffers.lock();
+        for opt_buf in input_buffers.iter_mut() {
             if let Some(buf) = opt_buf {
                 for ch in buf.iter_mut() {
                     ch.resize(max_frames, 0.0);
@@ -112,9 +133,10 @@ impl GraphNode {
         }
     }
 
-    pub fn clear_output_buffers(&mut self) {
-        for port_buf in &mut self.output_buffers {
-            for ch in port_buf {
+    pub fn clear_output_buffers(&self) {
+        let mut output_buffers = self.output_buffers.lock();
+        for port_buf in output_buffers.iter_mut() {
+            for ch in port_buf.iter_mut() {
                 ch.fill(0.0);
             }
         }
@@ -136,6 +158,22 @@ pub struct AudioGraph {
     topology_dirty: bool,
 
     next_node_id: u64,
+}
+
+impl Clone for AudioGraph {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: self.nodes.iter().map(|(&id, n)| (id, n.clone())).collect(),
+            connections: self.connections.clone(),
+            process_order: self.process_order.clone(),
+            input_node_id: self.input_node_id,
+            output_node_id: self.output_node_id,
+            max_frames: self.max_frames,
+            sample_rate: self.sample_rate,
+            topology_dirty: self.topology_dirty,
+            next_node_id: self.next_node_id,
+        }
+    }
 }
 
 impl AudioGraph {
@@ -299,8 +337,9 @@ impl AudioGraph {
         let order = self.topological_sort()?;
         self.process_order = order;
         let mf = self.max_frames;
-        for node in self.nodes.values_mut() {
-            for port_buf in &mut node.output_buffers {
+        for node in self.nodes.values() {
+            let mut output_buffers = node.output_buffers.lock();
+            for port_buf in output_buffers.iter_mut() {
                 for ch_buf in port_buf.iter_mut() {
                     ch_buf.resize(mf, 0.0);
                 }
@@ -379,26 +418,24 @@ impl AudioGraph {
         false
     }
 
-    fn process_internal(&mut self, input: &[Vec<f32>], num_frames: usize) {
+    fn process_internal(&self, input: &[Vec<f32>], num_frames: usize) {
         if self.topology_dirty {
-            if self.commit_topology().is_err() {
-                return;
-            }
+            return;
         }
 
         for &node_id in &self.process_order {
-            let node = self.nodes.get_mut(&node_id).unwrap();
+            let node = self.nodes.get(&node_id).unwrap();
             node.clear_output_buffers();
         }
 
         if let Some(input_id) = self.input_node_id {
-            if let Some(input_node) = self.nodes.get_mut(&input_id) {
-                if let Some(out_buf) = input_node.output_buffers.get_mut(0) {
-                    let ch_count = out_buf.len().min(input.len());
-                    for ch in 0..ch_count {
-                        let copy_len = num_frames.min(out_buf[ch].len()).min(input[ch].len());
-                        out_buf[ch][..copy_len].copy_from_slice(&input[ch][..copy_len]);
-                    }
+            let input_node = self.nodes.get(&input_id).unwrap();
+            let mut output_buffers = input_node.output_buffers.lock();
+            if let Some(out_buf) = output_buffers.get_mut(0) {
+                let ch_count = out_buf.len().min(input.len());
+                for ch in 0..ch_count {
+                    let copy_len = num_frames.min(out_buf[ch].len()).min(input[ch].len());
+                    out_buf[ch][..copy_len].copy_from_slice(&input[ch][..copy_len]);
                 }
             }
         }
@@ -425,13 +462,14 @@ impl AudioGraph {
         }
     }
 
-    pub fn process(&mut self, input: &[Vec<f32>], num_frames: usize) -> Vec<Vec<f32>> {
+    pub fn process(&self, input: &[Vec<f32>], num_frames: usize) -> Vec<Vec<f32>> {
         self.process_internal(input, num_frames);
 
         let output_id = self.output_node_id;
         if let Some(output_id) = output_id {
             let output_node = self.nodes.get(&output_id).unwrap();
-            if let Some(Some(buf)) = output_node.input_buffers.get(0) {
+            let input_buffers = output_node.input_buffers.lock();
+            if let Some(buf) = input_buffers.get(0).and_then(|opt| opt.as_ref()) {
                 let ch_count = buf.len().min(2);
                 let mut result = vec![vec![0.0f32; num_frames]; 2];
                 for ch in 0..ch_count {
@@ -449,7 +487,7 @@ impl AudioGraph {
         vec![vec![0.0f32; num_frames]; 2]
     }
 
-    pub fn process_into(&mut self, input: &[Vec<f32>], output: &mut [Vec<f32>], num_frames: usize) {
+    pub fn process_into(&self, input: &[Vec<f32>], output: &mut [Vec<f32>], num_frames: usize) {
         for ch in output.iter_mut() {
             let len = num_frames.min(ch.len());
             ch[..len].fill(0.0);
@@ -460,7 +498,8 @@ impl AudioGraph {
         let output_id = self.output_node_id;
         if let Some(output_id) = output_id {
             let output_node = self.nodes.get(&output_id).unwrap();
-            if let Some(Some(buf)) = output_node.input_buffers.get(0) {
+            let input_buffers = output_node.input_buffers.lock();
+            if let Some(buf) = input_buffers.get(0).and_then(|opt| opt.as_ref()) {
                 let ch_count = buf.len().min(output.len());
                 for ch in 0..ch_count {
                     let copy_len = num_frames.min(output[ch].len()).min(buf[ch].len());
@@ -474,7 +513,7 @@ impl AudioGraph {
         }
     }
 
-    fn gather_inputs(&mut self, node_id: NodeId, num_frames: usize) {
+    fn gather_inputs(&self, node_id: NodeId, num_frames: usize) {
         let max_frames = self.max_frames;
 
         let incoming: Vec<(PortId, Vec<(NodeId, PortId)>)> = {
@@ -524,12 +563,13 @@ impl AudioGraph {
             for (src_idx, (src_node_id, src_port_id)) in sources.iter().enumerate() {
                 let src_buffers: Vec<Vec<f32>> = {
                     if let Some(src_node) = self.nodes.get(src_node_id) {
+                        let output_buffers = src_node.output_buffers.lock();
                         if let Some(pidx) = src_node
                             .output_ports
                             .iter()
                             .position(|p| p.id == *src_port_id)
                         {
-                            if let Some(src_buf) = src_node.output_buffers.get(pidx) {
+                            if let Some(src_buf) = output_buffers.get(pidx) {
                                 src_buf.clone()
                             } else {
                                 continue;
@@ -590,20 +630,23 @@ impl AudioGraph {
             }
         }
 
-        let node = self.nodes.get_mut(&node_id).unwrap();
-        for (i, port) in node.input_ports.iter().enumerate() {
-            if i >= new_input_buffers.len() {
-                break;
-            }
-            if new_input_buffers[i].is_none() {
-                let ch_count = port.channels.channel_count();
-                new_input_buffers[i] = Some(vec![vec![0.0f32; max_frames]; ch_count]);
+        let node = self.nodes.get(&node_id).unwrap();
+        {
+            let ports = &node.input_ports;
+            for (i, port) in ports.iter().enumerate() {
+                if i >= new_input_buffers.len() {
+                    break;
+                }
+                if new_input_buffers[i].is_none() {
+                    let ch_count = port.channels.channel_count();
+                    new_input_buffers[i] = Some(vec![vec![0.0f32; max_frames]; ch_count]);
+                }
             }
         }
-        node.input_buffers = new_input_buffers;
+        *node.input_buffers.lock() = new_input_buffers;
     }
 
-    fn process_node(&mut self, node_id: NodeId, num_frames: usize) {
+    fn process_node(&self, node_id: NodeId, num_frames: usize) {
         let node_type: NodeType = {
             let node = self.nodes.get(&node_id).unwrap();
             node.node_type.clone()
@@ -638,7 +681,7 @@ impl AudioGraph {
         }
     }
 
-    fn process_pan_node(&mut self, node_id: NodeId, num_frames: usize) {
+    fn process_pan_node(&self, node_id: NodeId, num_frames: usize) {
         let pan_value = {
             let node = self.nodes.get(&node_id).unwrap();
             match &node.internal_state {
@@ -653,12 +696,14 @@ impl AudioGraph {
 
         let input_data: Option<Vec<Vec<f32>>> = {
             let node = self.nodes.get(&node_id).unwrap();
-            node.input_buffers.get(0).and_then(|opt| opt.clone())
+            let input_buffers = node.input_buffers.lock();
+            input_buffers.get(0).and_then(|opt| opt.clone())
         };
 
-        let node = self.nodes.get_mut(&node_id).unwrap();
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
         if let Some(input_buf) = input_data {
-            if let Some(out_buf) = node.output_buffers.get_mut(0) {
+            if let Some(out_buf) = output_buffers.get_mut(0) {
                 if out_buf.len() >= 2 && !input_buf.is_empty() {
                     let copy_len = num_frames
                         .min(input_buf[0].len())
@@ -673,7 +718,7 @@ impl AudioGraph {
         }
     }
 
-    fn process_gain_node(&mut self, node_id: NodeId, num_frames: usize) {
+    fn process_gain_node(&self, node_id: NodeId, num_frames: usize) {
         let gain_value = {
             let node = self.nodes.get(&node_id).unwrap();
             match &node.internal_state {
@@ -684,12 +729,14 @@ impl AudioGraph {
 
         let input_data: Option<Vec<Vec<f32>>> = {
             let node = self.nodes.get(&node_id).unwrap();
-            node.input_buffers.get(0).and_then(|opt| opt.clone())
+            let input_buffers = node.input_buffers.lock();
+            input_buffers.get(0).and_then(|opt| opt.clone())
         };
 
-        let node = self.nodes.get_mut(&node_id).unwrap();
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
         if let Some(input_buf) = input_data {
-            if let Some(out_buf) = node.output_buffers.get_mut(0) {
+            if let Some(out_buf) = output_buffers.get_mut(0) {
                 let ch_count = input_buf.len().min(out_buf.len());
                 for ch in 0..ch_count {
                     let copy_len = num_frames.min(input_buf[ch].len()).min(out_buf[ch].len());
@@ -701,21 +748,22 @@ impl AudioGraph {
         }
     }
 
-    fn process_mixer_node(&mut self, node_id: NodeId, num_frames: usize) {
-        let input_buffers: Vec<Option<Vec<Vec<f32>>>> = {
+    fn process_mixer_node(&self, node_id: NodeId, num_frames: usize) {
+        let input_buffers_data: Vec<Option<Vec<Vec<f32>>>> = {
             let node = self.nodes.get(&node_id).unwrap();
-            node.input_buffers.clone()
+            node.input_buffers.lock().clone()
         };
 
-        let node = self.nodes.get_mut(&node_id).unwrap();
-        if let Some(out_buf) = node.output_buffers.get_mut(0) {
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
+        if let Some(out_buf) = output_buffers.get_mut(0) {
             for ch in 0..out_buf.len() {
                 for i in 0..num_frames.min(out_buf[ch].len()) {
                     out_buf[ch][i] = 0.0;
                 }
             }
 
-            for input_buf_opt in &input_buffers {
+            for input_buf_opt in &input_buffers_data {
                 if let Some(input_buf) = input_buf_opt {
                     let ch_count = input_buf.len().min(out_buf.len());
                     for ch in 0..ch_count {
@@ -729,18 +777,20 @@ impl AudioGraph {
         }
     }
 
-    fn process_splitter_node(&mut self, node_id: NodeId, num_frames: usize) {
+    fn process_splitter_node(&self, node_id: NodeId, num_frames: usize) {
         let input_data: Option<Vec<Vec<f32>>> = {
             let node = self.nodes.get(&node_id).unwrap();
-            node.input_buffers.get(0).and_then(|opt| opt.clone())
+            let input_buffers = node.input_buffers.lock();
+            input_buffers.get(0).and_then(|opt| opt.clone())
         };
 
-        let node = self.nodes.get_mut(&node_id).unwrap();
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
         let Some(input_data) = input_data else {
             return;
         };
 
-        for out_buf in &mut node.output_buffers {
+        for out_buf in output_buffers.iter_mut() {
             let ch_count = input_data.len().min(out_buf.len());
             for ch in 0..ch_count {
                 let copy_len = num_frames.min(input_data[ch].len()).min(out_buf[ch].len());
@@ -749,18 +799,20 @@ impl AudioGraph {
         }
     }
 
-    fn process_converter_node(&mut self, node_id: NodeId, num_frames: usize) {
+    fn process_converter_node(&self, node_id: NodeId, num_frames: usize) {
         let input_data: Option<Vec<Vec<f32>>> = {
             let node = self.nodes.get(&node_id).unwrap();
-            node.input_buffers.get(0).and_then(|opt| opt.clone())
+            let input_buffers = node.input_buffers.lock();
+            input_buffers.get(0).and_then(|opt| opt.clone())
         };
 
-        let node = self.nodes.get_mut(&node_id).unwrap();
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
         let Some(input_data) = input_data else {
             return;
         };
 
-        if let Some(out_buf) = node.output_buffers.get_mut(0) {
+        if let Some(out_buf) = output_buffers.get_mut(0) {
             let in_ch = input_data.len();
             let out_ch = out_buf.len();
 
@@ -789,7 +841,7 @@ impl AudioGraph {
         }
     }
 
-    fn process_metronome_node(&mut self, node_id: NodeId, num_frames: usize) {
+    fn process_metronome_node(&self, node_id: NodeId, num_frames: usize) {
         let (bpm, volume) = {
             let node = self.nodes.get(&node_id).unwrap();
             match &node.internal_state {
@@ -803,9 +855,10 @@ impl AudioGraph {
         let sample_rate = self.sample_rate;
         let samples_per_beat = sample_rate * 60.0 / bpm;
 
-        let node = self.nodes.get_mut(&node_id).unwrap();
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
 
-        if let Some(out_buf) = node.output_buffers.get_mut(0) {
+        if let Some(out_buf) = output_buffers.get_mut(0) {
             if out_buf.is_empty() {
                 return;
             }
@@ -839,15 +892,17 @@ impl AudioGraph {
         }
     }
 
-    fn process_looper_node(&mut self, node_id: NodeId, num_frames: usize) {
+    fn process_looper_node(&self, node_id: NodeId, num_frames: usize) {
         let input_data: Option<Vec<Vec<f32>>> = {
             let node = self.nodes.get(&node_id).unwrap();
-            node.input_buffers.get(0).and_then(|opt| opt.clone())
+            let input_buffers = node.input_buffers.lock();
+            input_buffers.get(0).and_then(|opt| opt.clone())
         };
 
-        let node = self.nodes.get_mut(&node_id).unwrap();
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
         if let Some(input_buf) = input_data {
-            if let Some(out_buf) = node.output_buffers.get_mut(0) {
+            if let Some(out_buf) = output_buffers.get_mut(0) {
                 let ch_count = input_buf.len().min(out_buf.len());
                 for ch in 0..ch_count {
                     let len = num_frames.min(input_buf[ch].len()).min(out_buf[ch].len());
@@ -857,10 +912,11 @@ impl AudioGraph {
         }
     }
 
-    fn process_vst_node(&mut self, node_id: NodeId, num_frames: usize) {
+    fn process_vst_node(&self, node_id: NodeId, num_frames: usize) {
         let input_data: Vec<Vec<f32>> = {
             let node = self.nodes.get(&node_id).unwrap();
-            node.input_buffers
+            let input_buffers = node.input_buffers.lock();
+            input_buffers
                 .get(0)
                 .and_then(|opt| opt.clone())
                 .unwrap_or_default()
@@ -880,7 +936,7 @@ impl AudioGraph {
 
         let has_plugin = {
             let node = self.nodes.get(&node_id).unwrap();
-            node.plugin_instance.is_some()
+            node.plugin_instance.lock().is_some()
         };
 
         if has_plugin {
@@ -892,16 +948,18 @@ impl AudioGraph {
             }
 
             {
-                let node = self.nodes.get_mut(&node_id).unwrap();
-                if let Some(ref mut plugin) = node.plugin_instance {
+                let node = self.nodes.get(&node_id).unwrap();
+                let mut plugin_instance = node.plugin_instance.lock();
+                if let Some(ref mut plugin) = *plugin_instance {
                     let mut slices: Vec<&mut [f32]> =
                         temp_io.iter_mut().map(|v| &mut v[..]).collect();
                     plugin.process_in_place(&mut slices, num_frames as i32);
                 }
             }
 
-            let node = self.nodes.get_mut(&node_id).unwrap();
-            if let Some(out_buf) = node.output_buffers.get_mut(0) {
+            let node = self.nodes.get(&node_id).unwrap();
+            let mut output_buffers = node.output_buffers.lock();
+            if let Some(out_buf) = output_buffers.get_mut(0) {
                 let out_ch = out_buf.len().min(num_ch);
                 for ch in 0..out_ch {
                     let len = num_frames.min(temp_io[ch].len()).min(out_buf[ch].len());
@@ -909,8 +967,9 @@ impl AudioGraph {
                 }
             }
         } else {
-            let node = self.nodes.get_mut(&node_id).unwrap();
-            if let Some(out_buf) = node.output_buffers.get_mut(0) {
+            let node = self.nodes.get(&node_id).unwrap();
+            let mut output_buffers = node.output_buffers.lock();
+            if let Some(out_buf) = output_buffers.get_mut(0) {
                 let out_ch = out_buf.len();
                 let in_ch = input_data.len();
                 let ch_count = in_ch.min(out_ch);
@@ -922,15 +981,17 @@ impl AudioGraph {
         }
     }
 
-    fn bypass_node(&mut self, node_id: NodeId, num_frames: usize) {
+    fn bypass_node(&self, node_id: NodeId, num_frames: usize) {
         let input_data: Option<Vec<Vec<f32>>> = {
             let node = self.nodes.get(&node_id).unwrap();
-            node.input_buffers.first().and_then(|opt| opt.clone())
+            let input_buffers = node.input_buffers.lock();
+            input_buffers.first().and_then(|opt| opt.clone())
         };
 
-        let node = self.nodes.get_mut(&node_id).unwrap();
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
         if let Some(input_buf) = input_data {
-            if let Some(out_buf) = node.output_buffers.first_mut() {
+            if let Some(out_buf) = output_buffers.first_mut() {
                 let in_ch = input_buf.len();
                 let out_ch = out_buf.len();
 
@@ -997,7 +1058,7 @@ impl AudioGraph {
 
     pub fn set_max_frames(&mut self, frames: usize) {
         self.max_frames = frames;
-        for node in self.nodes.values_mut() {
+        for node in self.nodes.values() {
             node.resize_buffers(frames);
         }
     }

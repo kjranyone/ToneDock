@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, HostId, SampleFormat, Stream};
 use parking_lot::Mutex;
@@ -33,7 +34,7 @@ pub struct AudioEngine {
     pub sample_rate: f64,
     pub buffer_size: u32,
     pub chain: Arc<Mutex<Chain>>,
-    pub graph: Arc<Mutex<AudioGraph>>,
+    pub graph: Arc<ArcSwap<AudioGraph>>,
     pub metronome: Arc<Mutex<Metronome>>,
     pub looper: Arc<Mutex<Looper>>,
     pub master_volume: Arc<Mutex<f32>>,
@@ -229,7 +230,7 @@ impl AudioEngine {
             sample_rate,
             buffer_size,
             chain: Arc::new(Mutex::new(Chain::new())),
-            graph: Arc::new(Mutex::new(graph)),
+            graph: Arc::new(ArcSwap::from_pointee(graph)),
             metronome: Arc::new(Mutex::new(Metronome::new(sample_rate))),
             looper: Arc::new(Mutex::new(Looper::new(num_channels, sample_rate))),
             master_volume: Arc::new(Mutex::new(0.8)),
@@ -357,14 +358,30 @@ impl AudioEngine {
                     *il = (peak, peak);
                 }
 
+                {
+                    let mut pending = Vec::new();
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        pending.push(cmd);
+                    }
+                    if !pending.is_empty() {
+                        let guard = graph.load();
+                        let mut staging = (**guard).clone();
+                        for cmd in pending {
+                            apply_command(&mut staging, cmd);
+                        }
+                        drop(guard);
+                        if let Err(e) = staging.commit_topology() {
+                            log::error!("Topology commit in audio thread failed: {}", e);
+                        }
+                        graph.store(Arc::new(staging));
+                    }
+                }
+
                 let mut output_stereo = vec![vec![0.0f32; num_frames]; 2];
                 {
-                    let mut graph_guard = graph.lock();
-                    while let Ok(cmd) = cmd_rx.try_recv() {
-                        apply_command(&mut graph_guard, cmd);
-                    }
+                    let guard = graph.load();
                     let input = vec![input_mono];
-                    output_stereo = graph_guard.process(&input, num_frames);
+                    output_stereo = guard.process(&input, num_frames);
                 }
 
                 {
@@ -438,10 +455,22 @@ impl AudioEngine {
         }
     }
 
-    pub fn drain_pending_commands(&self) {
+    pub fn apply_commands_to_staging(&self) {
+        let mut pending = Vec::new();
         while let Ok(cmd) = self.command_rx.try_recv() {
-            let mut graph = self.graph.lock();
-            apply_command(&mut graph, cmd);
+            pending.push(cmd);
+        }
+        if !pending.is_empty() {
+            let guard = self.graph.load();
+            let mut staging = (**guard).clone();
+            drop(guard);
+            for cmd in pending {
+                apply_command(&mut staging, cmd);
+            }
+            if let Err(e) = staging.commit_topology() {
+                log::error!("Topology commit in staging failed: {}", e);
+            }
+            self.graph.store(Arc::new(staging));
         }
     }
 
