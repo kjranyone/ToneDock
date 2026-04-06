@@ -1,17 +1,15 @@
 # ToneDock — Handover資料
 
-最終更新: 2026-04-06 10:07 JST
+最終更新: 2026-04-06 17:07 JST
 
 ## プロジェクト概要
 
 **ToneDock** は Rust で書くギター練習用 VST3 ホストアプリです。GPL-3.0 ライセンス。
 
 - リポジトリ: `C:\lib\github\kjranyone\ToneDock`
-- `cargo check` **通ります** / `cargo test` **13テスト全パス**
+- `cargo check` **0 warnings で通ります** / `cargo test` **22テスト全パス**
 - 設計書: `docs/node_based_routing_design.md`
-- 新依存: `arc-swap = "1"` （Phase 2-3で追加）
-
-## 現在のアーキテクチャ
+- 新依存: `arc-swap = "1"` （Phase 2-3で追加）## 現在のアーキテクチャ
 
 ```
 src/
@@ -34,6 +32,7 @@ src/
 │   ├── controls.rs       — ノブ・トグルUI部品
 │   ├── meters.rs         — ステレオレベルメーター
 │   ├── rack_view.rs       — プラグインラックビュー
+│   ├── node_editor.rs     — ノードグラフエディタ（Phase 3-1）
 │   └── preferences.rs    — 設定ダイアログ
 └── vst_host/
     ├── mod.rs
@@ -129,7 +128,7 @@ src/
 - `apply_commands_to_staging()` — UIスレッドからコマンドを直接適用してスワップ（ストリーム停止時などに使用）
 - 旧 `drain_pending_commands()` は削除（ロック競合の原因を根本解消）
 
-### テスト結果（13テスト全パス）
+### テスト結果（22テスト全パス）
 - `test_add_audio_input_output` — シングルトンノードの追加
 - `test_singleton_violation` — 二重追加の拒否
 - `test_connect_and_topology` — トポロジカルソート順序の検証
@@ -143,6 +142,15 @@ src/
 - `test_disconnect` — コネクション削除
 - `test_bypass_node` — バイパス時のパススルー
 - `test_disabled_node` — 無効時のサイレント出力
+- `test_set_node_position` — ノード位置設定
+- `test_set_node_enabled_bypassed` — 有効/バイパス切替
+- `test_already_connected` — 重複接続の拒否
+- `test_connect_nonexistent_node` — 存在しないノードへの接続拒否
+- `test_session_default_has_no_graph` — デフォルトセッションにグラフなし
+- `test_session_roundtrip` — セッション保存→読み込みの一貫性
+- `test_legacy_migration` — 旧チェーン→グラフ自動マイグレーション
+- `test_empty_chain_no_migration` — 空チェーンではマイグレーションなし
+- `test_legacy_migration_chain_order` — マイグレーション接続順序の検証
 
 ### Phase 2 残り 〜 Phase 4: 未実装
 
@@ -150,11 +158,50 @@ src/
 |-------|------|------|
 | 2-3 | ダブルバッファ戦略（arc_swap、ロックフリー処理） | ✅ 完了 |
 | 2-4 | Looper/Metronome のノード化 | ✅ 完了 |
-| 2-5 | 後方互換セッション読み込み | 未着手 |
-| Phase 3 | ノードエディタUI | 未着手 |
-| Phase 4 | 高度なルーティング（Send/Return、Wet/Dry） | 未着手 |
+| 2-5 | 後方互換セッション読み込み | ✅ 完了 |
+| 3-1 | ノードエディタUI（基礎） | ✅ 完了 |
+| 3-2 | ノードエディタUI（パラメータ編集・接続削除・複製・ズームフィット） | ✅ 完了 |
+| 3-3 | ノードエディタUI（VSTプラグイン統合） | ✅ 完了 |
+| Phase 4 | 高度なルーティング（セッション保存/復元・マイグレーション） | ✅ 完了 |
 
-### Phase 2-4: Looper/Metronome のノード化 ✅ 完了
+### Phase 3-1: ノードエディタUI（基礎） ✅ 完了
+
+**src/ui/node_editor.rs** — 新規ファイル（キャンバスベースのノードグラフエディタ）:
+- `NodeSnap` — グラフからUIへのノードスナップショット
+- `EdCmd` — UI→エンジンへのコマンド列挙型（AddNode, RemoveNode, Connect, SetPos, ToggleBypass, Commit）
+- `NodeEditor` — エディタステート（pan, zoom, 選択, ドラッグ状態）
+- **ノード表示**: ボックス＋ヘッダー＋ポート（左=入力、右=出力）＋パラメータ値
+- **ポート色**: Mono=黄色、Stereo=シアン
+- **接続線**: ベジエ曲線（出力ポート→入力ポート）
+- **操作**:
+  - LMBドラッグ（ノード）→ 移動（SetPos）
+  - LMBドラッグ（出力ポート）→ 接続線を引き出し→入力ポートで離す（Connect）
+  - LMBドラッグ（背景）→ キャンバスパン
+  - MMBドラッグ → キャンバスパン
+  - RMB → コンテキストメニュー（ノード追加/削除/バイパス切替）
+  - Scroll → ズームイン/アウト（マウス位置基準）
+  - Delete/Backspace → 選択ノード削除（AudioIn/Outは保護）
+- **コンテキストメニュー追加可能ノード**: Gain, Pan, Splitter(2-out), Mixer(2-in), Converter(M→S, S→M), Metronome, Looper
+- ステータスバー（ノード数、ズーム率、操作ヒント）
+
+**src/ui/mod.rs 変更点**:
+- `pub mod node_editor;` 追加
+
+**src/audio/engine.rs 変更点**:
+- `add_node_with_position(&self, node_type, x, y) -> NodeId` — ノード追加＋位置設定を一括実行
+- 新ノードIDの特定: グラフ内の最大NodeIdを検索（IDは単調増加）
+
+**src/audio/node.rs 変更点**:
+- `NodeId` に `Ord, PartialOrd` derive を追加（`max()` 用于意）
+
+**src/app.rs 変更点**:
+- `ViewMode` enum 追加（Rack / NodeEditor）
+- `ToneDockApp` に `view_mode`, `node_editor` フィールド追加
+- ツールバーに「Node Editor」/「Rack View」切替ボタン追加
+- CentralPanel を ViewMode に応じて切替:
+  - `show_rack_view()` — 従来のラックビュー（リファクタリング）
+  - `show_node_editor()` — ノードエディタ＋サイドメーター
+- `process_editor_commands()` — EdCmd をエンジンメソッド呼び出しに変換
 
 **src/audio/graph.rs 変更点**:
 - `GraphNode` に `looper_buffer: Mutex<Option<LooperBuffer>>` フィールドを追加
@@ -183,15 +230,134 @@ src/
 - `graph_set_enabled()` + `graph_commit_topology()` でノードの有効/無効を管理
 - ループ長表示: `graph.load().looper_loop_length()` から取得
 
-## 次にやること（Phase 2-5: 後方互換セッション読み込み）
+### Phase 3-2: ノードエディタUI（パラメータ編集・接続削除・複製・ズームフィット） ✅ 完了
 
-- 旧 `Vec<ChainSlot>` 形式のセッションを AudioGraph 形式に自動変換
-- `migrate_legacy_session()` を実装
+**src/ui/node_editor.rs 変更点**:
 
-### Phase 3: ノードエディタUI
-- ノードグラフの可視化エディタ
-- ドラッグ&ドロップでノード間接続
-- ノードの追加/削除UI
+- **インラインパラメータ編集**:
+  - `DragParam` 構造体追加 — ドラッグ開始位置・初期値・現在値を管理
+  - `has_editable_param()` — Gain/Panノード判定
+  - `hit_param()` — パラメータ領域のヒットテスト
+  - `param_srect()` — パラメータスライダー領域のスクリーン座標計算
+  - `node_h()` に `PARAM_ROW`(24px) を追加 — 編集可能ノードは高さが増える
+  - ドラッグ中は `current_value` をリアルタイム表示（1フレーム遅延なし）
+  - `EdCmd::SetState(NodeId, NodeInternalState)` — パラメータ変更コマンド追加
+  - スライダーUI: 暗い背景 + 青いフィルバー + 値テキスト（Gain: 数値、Pan: L/R/C）
+
+- **接続線削除UI**:
+  - `hit_connection()` — ベジエ曲線上のヒットテスト（20分割サンプリング）
+  - `point_near_bezier()` — 点とベジエ曲線の距離判定
+  - `hover_conn: Option<usize>` — ホバー中の接続インデックス
+  - `menu_conn: Option<usize>` — 右クリック時の接続インデックス
+  - ホバー時: 接続線が赤色(`COL_CONN_HOVER`) + 太線(3.5px)で強調表示
+  - 右クリック時: コンテキストメニューに "Delete Connection" オプション表示
+  - Delete/Backspace: ノード未選択時にホバー接続を削除
+  - `EdCmd::Disconnect(NodeId, PortId, NodeId, PortId)` — 接続削除コマンド追加
+
+- **ノード複製 (Ctrl+D)**:
+  - `EdCmd::DuplicateNode(NodeId)` — 複製コマンド追加
+  - オフセット(+50, +50)で新ノード作成、内部状態をコピー
+  - AudioIn/Out は複製不可
+  - 複製後、新ノードを自動選択 (`set_selection()`)
+  - コンテキストメニューの "Duplicate" ボタンからも実行可能
+
+- **ズームフィット (Fキー)**:
+  - `zoom_to_fit()` — 全ノードをキャンバスにフィット
+  - バウンディングボックス + 60px マージンで計算
+  - アスペクト比を維持してズーム + パン調整
+  - コンテキストメニューの "Fit All (F)" ボタンからも実行可能
+
+- **操作優先度の明確化**:
+  1. 出力ポート → 接続ドラッグ
+  2. パラメータ領域 → パラメータドラッグ
+  3. ノード本体 → ノード移動
+  4. 背景 → キャンバスパン
+
+- **ステータスバー更新**:
+  - `F: fit  Ctrl+D: duplicate` を追加
+
+**src/app.rs 変更点**:
+- `process_editor_commands()` に3つの新コマンドハンドラ追加:
+  - `EdCmd::Disconnect` — `graph_disconnect()` 呼び出し
+  - `EdCmd::SetState` — `graph_set_state()` 呼び出し
+  - `EdCmd::DuplicateNode` — グラフからノード情報取得 → 新ノード追加 → 状態コピー → 選択
+
+**paint_bezier() シグネチャ変更**:
+- `width: f32` パラメータ追加 — ホバー時の太線表示に対応
+
+### Phase 3-3: ノードエディタUI（VSTプラグイン統合） ✅ 完了
+
+**src/ui/node_editor.rs 変更点**:
+
+- **`EdCmd` enum 拡張**:
+  - `AddVstNode { plugin_path, plugin_name, pos }` — VSTプラグインノード追加コマンド
+  - `SetVstParameter { node_id, param_index, value }` — VSTパラメータ変更コマンド
+- **`show()` シグネチャ変更**: `available_plugins: &[PluginInfo]` パラメータ追加
+- **`selected_node()` アクセサ**: 現在選択中のノードIDを返す
+- **コンテキストメニューにVST Pluginsセクション追加**:
+  - スキャン済みプラグイン一覧を「VST Plugins」ヘッダー下に表示
+  - プラグイン名ボタンクリックで `EdCmd::AddVstNode` を発行
+  - プラグインがない場合はセクションを非表示
+
+**src/audio/engine.rs 変更点**:
+
+- **`load_vst_plugin_to_node(node_id, info)`** — GraphNodeにVSTプラグインをロード:
+  - `LoadedPlugin::load()` + `setup_processing()` で初期化
+  - `graph.load()` → `clone()` → `plugin_instance` にセット → `graph.store()` でアトミックスワップ
+- **`set_vst_node_parameter(node_id, param_index, value)`** — VSTパラメータ設定:
+  - clone → `plugin.set_parameter()` → store のパターン
+- **`get_vst_node_parameters(node_id)`** — パラメータ情報取得:
+  - `plugin.parameter_info()` を返す
+- **`get_vst_node_parameter_value(node_id, param_index)`** — パラメータ値取得:
+  - `plugin.get_parameter()` を返す
+- 新依存インポート: `LoadedPlugin`, `PluginInfo`
+
+**src/app.rs 変更点**:
+
+- **`show_node_editor()`**:
+  - `node_editor.show()` に `available_plugins` を渡すよう変更
+  - サイドパネルに `draw_vst_parameter_panel()` を追加（選択ノードがVSTの場合）
+- **`process_editor_commands()`** に2つの新コマンドハンドラ追加:
+  - `EdCmd::AddVstNode` — NodeType::VstPlugin ノード追加 → `load_vst_plugin_to_node()` でプラグインロード
+  - `EdCmd::SetVstParameter` — `set_vst_node_parameter()` 呼び出し
+- **`draw_vst_parameter_panel()`** 新規メソッド:
+  - 選択ノードがVSTプラグインの場合、サイドパネルにパラメータノブを表示
+  - プラグイン未ロード時は「Plugin not loaded」表示
+  - ノブサイズ44px、3列レイアウトでパラメータ一覧表示
+  - `get_vst_node_parameters()` / `get_vst_node_parameter_value()` / `set_vst_node_parameter()` で値をやり取り
+- `NodeType` のインポートを追加
+
+### Phase 4: セッション保存/復元・マイグレーション ✅ 完了
+
+**src/session.rs**:
+- `Session` 構造体に `graph: Option<SerializedGraph>` フィールド追加（`#[serde(default)]`）
+- `migrate_legacy_session()` — 旧 `Vec<ChainSlot>` → `SerializedGraph` に変換
+- `load_from_file()` — 読み込み時に `graph` が `None` で `chain` が非空の場合、自動マイグレーション
+
+**src/app.rs**:
+- `build_session()` — 現在の AudioGraph から SerializedGraph を生成して保存
+- `load_session()` — 読み込み後に `load_serialized_graph()` でグラフを復元
+
+**src/audio/engine.rs**:
+- `load_serialized_graph()` — SerializedGraph から AudioGraph を復元（ID マッピング、シングルトン制約、トポロジコミット、ArcSwap store）
+
+## 次にやること
+
+### Phase 5: 高度なルーティング（Send/Return、Wet/Dry）
+
+設計書 `docs/node_based_routing_design.md` の Phase 4 に該当する機能。現在未実装。
+
+- **Send/Return バス** — エフェクトのセンド/リターンルーティング
+- **Wet/Dry ノード** — エフェクトのミックス比制御
+- **パラレルチェーンのテンプレート** — "Wide Stereo Amp" 等のワンタップテンプレート
+- **ゼロコピースプリッター** — 出力バッファの参照共有でメモリコピー削減
+
+### その他の改善候補
+
+- **Rack View ↔ Node Editor 双方向同期** — 現在は独立して操作可能。同じ AudioGraph を操作する異なるビューとして統合
+- **Undo/Redo** — グラフ操作の履歴管理
+- **ノードエディタのマルチ選択** — 複数ノードの同時移動・削除
+- **VST パラメータオートメーション** — パラメータの時間変化記録
 
 ## 技術的メモ
 

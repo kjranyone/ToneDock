@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 pub struct Metronome {
     pub bpm: f64,
     pub enabled: bool,
@@ -11,6 +12,7 @@ pub struct Metronome {
 const CLICK_FREQ: f64 = 1000.0;
 const CLICK_DURATION_SAMPLES: usize = 480;
 
+#[allow(dead_code)]
 impl Metronome {
     pub fn new(sample_rate: f64) -> Self {
         let bpm = 120.0;

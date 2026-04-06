@@ -8,9 +8,13 @@ use std::sync::Arc;
 use crate::audio::chain::Chain;
 use crate::audio::graph::AudioGraph;
 use crate::audio::graph_command::GraphCommand;
-use crate::audio::node::{Connection, NodeId, NodeInternalState, NodeType, PortId};
+use crate::audio::node::{
+    Connection, NodeId, NodeInternalState, NodeType, PortId, SerializedGraph,
+};
 use crate::looper::Looper;
 use crate::metronome::Metronome;
+use crate::vst_host::plugin::LoadedPlugin;
+use crate::vst_host::scanner::PluginInfo;
 
 pub struct AudioHostInfo {
     pub id: HostId,
@@ -43,8 +47,11 @@ pub struct AudioEngine {
     pub input_level: Arc<Mutex<(f32, f32)>>,
     pub input_channels: (usize, usize),
     pub output_channels: (usize, usize),
+    #[allow(dead_code)]
     pub chain_node_ids: Vec<NodeId>,
+    #[allow(dead_code)]
     pub input_node_id: NodeId,
+    #[allow(dead_code)]
     pub output_node_id: NodeId,
 
     pub metronome_node_id: Option<NodeId>,
@@ -721,8 +728,20 @@ impl AudioEngine {
         self.send_command(GraphCommand::CommitTopology);
     }
 
+    #[allow(dead_code)]
     pub fn graph_send_command(&self, cmd: GraphCommand) {
         self.send_command(cmd);
+    }
+
+    pub fn add_node_with_position(&self, node_type: NodeType, x: f32, y: f32) -> NodeId {
+        self.graph_add_node(node_type);
+        self.apply_commands_to_staging();
+        let guard = self.graph.load();
+        let max_id = guard.nodes().keys().max().copied().unwrap_or(NodeId(0));
+        drop(guard);
+        self.send_command(GraphCommand::SetNodePosition(max_id, x, y));
+        self.apply_commands_to_staging();
+        max_id
     }
 
     pub fn add_metronome_node(&mut self) -> NodeId {
@@ -768,5 +787,118 @@ impl AudioEngine {
             }
         }
         None
+    }
+
+    pub fn load_serialized_graph(&self, data: &SerializedGraph) {
+        let guard = self.graph.load();
+        let mut new_graph = AudioGraph::new(guard.sample_rate(), guard.max_frames());
+        drop(guard);
+
+        let mut id_map: std::collections::HashMap<NodeId, NodeId> =
+            std::collections::HashMap::new();
+
+        for sn in &data.nodes {
+            let new_id = match new_graph.add_node(sn.node_type.clone()) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            id_map.insert(sn.id, new_id);
+
+            new_graph.set_node_enabled(new_id, sn.enabled);
+            new_graph.set_node_bypassed(new_id, sn.bypassed);
+            new_graph.set_node_position(new_id, sn.position.0, sn.position.1);
+        }
+
+        for conn in &data.connections {
+            let Some(&src) = id_map.get(&conn.source_node) else {
+                continue;
+            };
+            let Some(&tgt) = id_map.get(&conn.target_node) else {
+                continue;
+            };
+            let _ = new_graph.connect(Connection {
+                source_node: src,
+                source_port: conn.source_port,
+                target_node: tgt,
+                target_port: conn.target_port,
+            });
+        }
+
+        if let Err(e) = new_graph.commit_topology() {
+            log::error!("Failed to commit topology in load_serialized_graph: {}", e);
+        }
+
+        self.graph.store(Arc::new(new_graph));
+        log::info!(
+            "Loaded serialized graph: {} nodes, {} connections",
+            data.nodes.len(),
+            data.connections.len()
+        );
+    }
+
+    pub fn load_vst_plugin_to_node(
+        &self,
+        node_id: NodeId,
+        info: &PluginInfo,
+    ) -> anyhow::Result<()> {
+        let sr = self.sample_rate;
+        let bs = self.buffer_size as i32;
+
+        let mut plugin = LoadedPlugin::load(info)?;
+        plugin.setup_processing(sr, bs)?;
+
+        {
+            let guard = self.graph.load();
+            let staging = (**guard).clone();
+            drop(guard);
+
+            if let Some(node) = staging.get_node(node_id) {
+                *node.plugin_instance.lock() = Some(plugin);
+            } else {
+                return Err(anyhow::anyhow!("Node {:?} not found in graph", node_id));
+            }
+
+            self.graph.store(Arc::new(staging));
+        }
+
+        log::info!("VST plugin '{}' loaded into node {:?}", info.name, node_id);
+        Ok(())
+    }
+
+    pub fn set_vst_node_parameter(&self, node_id: NodeId, param_index: usize, value: f32) {
+        let guard = self.graph.load();
+        let staging = (**guard).clone();
+        drop(guard);
+
+        if let Some(node) = staging.get_node(node_id) {
+            let mut plugin_instance = node.plugin_instance.lock();
+            if let Some(ref mut plugin) = *plugin_instance {
+                plugin.set_parameter(param_index, value);
+            }
+        }
+
+        self.graph.store(Arc::new(staging));
+    }
+
+    pub fn get_vst_node_parameters(&self, node_id: NodeId) -> Vec<crate::audio::chain::ParamInfo> {
+        let guard = self.graph.load();
+        if let Some(node) = guard.get_node(node_id) {
+            let plugin_instance = node.plugin_instance.lock();
+            if let Some(ref plugin) = *plugin_instance {
+                return plugin.parameter_info();
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn get_vst_node_parameter_value(&self, node_id: NodeId, param_index: usize) -> f32 {
+        let guard = self.graph.load();
+        if let Some(node) = guard.get_node(node_id) {
+            let plugin_instance = node.plugin_instance.lock();
+            if let Some(ref plugin) = *plugin_instance {
+                return plugin.get_parameter(param_index);
+            }
+        }
+        0.0
     }
 }

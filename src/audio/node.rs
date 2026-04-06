@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,6 +50,13 @@ pub enum NodeType {
     Metronome,
     Looper,
     Gain,
+    WetDry,
+    SendBus {
+        bus_id: u32,
+    },
+    ReturnBus {
+        bus_id: u32,
+    },
 }
 
 impl NodeType {
@@ -106,6 +113,32 @@ impl NodeType {
                 name: "in".into(),
                 direction: PortDirection::Input,
                 channels: ChannelConfig::Mono,
+            }],
+            NodeType::WetDry => vec![
+                Port {
+                    id: PortId(0),
+                    name: "dry_in".into(),
+                    direction: PortDirection::Input,
+                    channels: ChannelConfig::Mono,
+                },
+                Port {
+                    id: PortId(1),
+                    name: "wet_in".into(),
+                    direction: PortDirection::Input,
+                    channels: ChannelConfig::Mono,
+                },
+            ],
+            NodeType::SendBus { .. } => vec![Port {
+                id: PortId(0),
+                name: "in".into(),
+                direction: PortDirection::Input,
+                channels: ChannelConfig::Stereo,
+            }],
+            NodeType::ReturnBus { .. } => vec![Port {
+                id: PortId(0),
+                name: "in".into(),
+                direction: PortDirection::Input,
+                channels: ChannelConfig::Stereo,
             }],
         }
     }
@@ -169,6 +202,32 @@ impl NodeType {
                 direction: PortDirection::Output,
                 channels: ChannelConfig::Mono,
             }],
+            NodeType::WetDry => vec![Port {
+                id: PortId(0),
+                name: "out".into(),
+                direction: PortDirection::Output,
+                channels: ChannelConfig::Mono,
+            }],
+            NodeType::SendBus { .. } => vec![
+                Port {
+                    id: PortId(0),
+                    name: "thru".into(),
+                    direction: PortDirection::Output,
+                    channels: ChannelConfig::Stereo,
+                },
+                Port {
+                    id: PortId(1),
+                    name: "send".into(),
+                    direction: PortDirection::Output,
+                    channels: ChannelConfig::Stereo,
+                },
+            ],
+            NodeType::ReturnBus { .. } => vec![Port {
+                id: PortId(0),
+                name: "out".into(),
+                direction: PortDirection::Output,
+                channels: ChannelConfig::Stereo,
+            }],
         }
     }
 
@@ -192,6 +251,7 @@ pub enum NodeInternalState {
     Looper(LooperNodeState),
     Gain { value: f32 },
     Pan { value: f32 },
+    WetDry { mix: f32 },
 }
 
 impl Default for NodeInternalState {

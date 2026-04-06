@@ -67,6 +67,7 @@ impl Chain {
         }
     }
 
+    #[allow(dead_code)]
     pub fn process(&mut self, input: &[&[f32]], output: &mut [&mut [f32]], num_frames: usize) {
         for ch in 0..output.len() {
             let in_ch = input.get(ch).copied().unwrap_or(&[0.0f32; 0]);

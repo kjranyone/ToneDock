@@ -1,6 +1,7 @@
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+#[allow(dead_code)]
 pub struct Looper {
     pub enabled: bool,
     pub recording: bool,
@@ -70,6 +71,7 @@ impl LooperBuffer {
         }
     }
 
+    #[allow(dead_code)]
     fn clear(&mut self) {
         for ch in &mut self.data {
             ch.fill(0.0);
@@ -79,6 +81,7 @@ impl LooperBuffer {
     }
 }
 
+#[allow(dead_code)]
 impl Looper {
     pub fn new(channels: usize, sample_rate: f64) -> Self {
         Self {

@@ -186,6 +186,7 @@ impl GraphNode {
             }),
             NodeType::Gain => NodeInternalState::Gain { value: 1.0 },
             NodeType::Pan => NodeInternalState::Pan { value: 0.0 },
+            NodeType::WetDry => NodeInternalState::WetDry { mix: 1.0 },
             _ => NodeInternalState::None,
         };
 
@@ -215,6 +216,7 @@ impl GraphNode {
         }
     }
 
+    #[allow(dead_code)]
     pub fn resize_buffers(&self, max_frames: usize) {
         let mut output_buffers = self.output_buffers.lock();
         for (i, port) in self.output_ports.iter().enumerate() {
@@ -590,6 +592,7 @@ impl AudioGraph {
         vec![vec![0.0f32; num_frames]; 2]
     }
 
+    #[allow(dead_code)]
     pub fn process_into(&self, input: &[Vec<f32>], output: &mut [Vec<f32>], num_frames: usize) {
         for ch in output.iter_mut() {
             let len = num_frames.min(ch.len());
@@ -780,6 +783,15 @@ impl AudioGraph {
             }
             NodeType::VstPlugin { .. } => {
                 self.process_vst_node(node_id, num_frames);
+            }
+            NodeType::WetDry => {
+                self.process_wetdry_node(node_id, num_frames);
+            }
+            NodeType::SendBus { .. } => {
+                self.process_send_bus_node(node_id, num_frames);
+            }
+            NodeType::ReturnBus { .. } => {
+                self.process_return_bus_node(node_id, num_frames);
             }
         }
     }
@@ -1177,10 +1189,12 @@ impl AudioGraph {
         self.nodes.get_mut(&id)
     }
 
+    #[allow(dead_code)]
     pub fn input_node_id(&self) -> Option<NodeId> {
         self.input_node_id
     }
 
+    #[allow(dead_code)]
     pub fn output_node_id(&self) -> Option<NodeId> {
         self.output_node_id
     }
@@ -1193,18 +1207,22 @@ impl AudioGraph {
         &self.nodes
     }
 
+    #[allow(dead_code)]
     pub fn nodes_mut(&mut self) -> &mut HashMap<NodeId, GraphNode> {
         &mut self.nodes
     }
 
+    #[allow(dead_code)]
     pub fn process_order(&self) -> &[NodeId] {
         &self.process_order
     }
 
+    #[allow(dead_code)]
     pub fn set_sample_rate(&mut self, sr: f64) {
         self.sample_rate = sr;
     }
 
+    #[allow(dead_code)]
     pub fn set_max_frames(&mut self, frames: usize) {
         self.max_frames = frames;
         for node in self.nodes.values() {
@@ -1263,6 +1281,96 @@ impl AudioGraph {
         if let Some(node) = self.nodes.get(&node_id) {
             let mut looper = node.looper_buffer.lock();
             *looper = Some(LooperBuffer::new(ch, sample_rate, 120.0));
+        }
+    }
+
+    fn process_wetdry_node(&self, node_id: NodeId, num_frames: usize) {
+        let mix = {
+            let node = self.nodes.get(&node_id).unwrap();
+            match &node.internal_state {
+                NodeInternalState::WetDry { mix } => *mix,
+                _ => 0.5,
+            }
+        };
+
+        let dry_data: Option<Vec<Vec<f32>>> = {
+            let node = self.nodes.get(&node_id).unwrap();
+            let input_buffers = node.input_buffers.lock();
+            input_buffers.get(0).and_then(|opt| opt.clone())
+        };
+
+        let wet_data: Option<Vec<Vec<f32>>> = {
+            let node = self.nodes.get(&node_id).unwrap();
+            let input_buffers = node.input_buffers.lock();
+            input_buffers.get(1).and_then(|opt| opt.clone())
+        };
+
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
+        if let Some(out_buf) = output_buffers.get_mut(0) {
+            let ch_count = out_buf.len();
+            for ch in 0..ch_count {
+                let len = num_frames.min(out_buf[ch].len());
+                for i in 0..len {
+                    let dry = dry_data
+                        .as_ref()
+                        .and_then(|d| d.get(ch).map(|c| c.get(i).copied().unwrap_or(0.0)))
+                        .unwrap_or(0.0);
+                    let wet = wet_data
+                        .as_ref()
+                        .and_then(|w| w.get(ch).map(|c| c.get(i).copied().unwrap_or(0.0)))
+                        .unwrap_or(0.0);
+                    out_buf[ch][i] = dry * (1.0 - mix) + wet * mix;
+                }
+            }
+        }
+    }
+
+    fn process_send_bus_node(&self, node_id: NodeId, num_frames: usize) {
+        let input_data: Option<Vec<Vec<f32>>> = {
+            let node = self.nodes.get(&node_id).unwrap();
+            let input_buffers = node.input_buffers.lock();
+            input_buffers.get(0).and_then(|opt| opt.clone())
+        };
+
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
+
+        if let Some(ref input_buf) = input_data {
+            if let Some(thru_buf) = output_buffers.get_mut(0) {
+                let ch_count = input_buf.len().min(thru_buf.len());
+                for ch in 0..ch_count {
+                    let len = num_frames.min(input_buf[ch].len()).min(thru_buf[ch].len());
+                    thru_buf[ch][..len].copy_from_slice(&input_buf[ch][..len]);
+                }
+            }
+            if let Some(send_buf) = output_buffers.get_mut(1) {
+                let ch_count = input_buf.len().min(send_buf.len());
+                for ch in 0..ch_count {
+                    let len = num_frames.min(input_buf[ch].len()).min(send_buf[ch].len());
+                    send_buf[ch][..len].copy_from_slice(&input_buf[ch][..len]);
+                }
+            }
+        }
+    }
+
+    fn process_return_bus_node(&self, node_id: NodeId, num_frames: usize) {
+        let input_data: Option<Vec<Vec<f32>>> = {
+            let node = self.nodes.get(&node_id).unwrap();
+            let input_buffers = node.input_buffers.lock();
+            input_buffers.get(0).and_then(|opt| opt.clone())
+        };
+
+        let node = self.nodes.get(&node_id).unwrap();
+        let mut output_buffers = node.output_buffers.lock();
+        if let Some(out_buf) = output_buffers.get_mut(0) {
+            if let Some(ref input_buf) = input_data {
+                let ch_count = input_buf.len().min(out_buf.len());
+                for ch in 0..ch_count {
+                    let len = num_frames.min(input_buf[ch].len()).min(out_buf[ch].len());
+                    out_buf[ch][..len].copy_from_slice(&input_buf[ch][..len]);
+                }
+            }
         }
     }
 }
@@ -1694,5 +1802,57 @@ mod tests {
                 output[0][i]
             );
         }
+    }
+
+    #[test]
+    fn test_set_node_position() {
+        let mut graph = AudioGraph::new(48000.0, 256);
+        let id = graph.add_node(NodeType::Gain).unwrap();
+        graph.set_node_position(id, 100.0, 200.0);
+        let node = graph.get_node(id).unwrap();
+        assert_eq!(node.position, (100.0, 200.0));
+    }
+
+    #[test]
+    fn test_set_node_enabled_bypassed() {
+        let mut graph = AudioGraph::new(48000.0, 256);
+        let id = graph.add_node(NodeType::Gain).unwrap();
+        assert!(graph.get_node(id).unwrap().enabled);
+        assert!(!graph.get_node(id).unwrap().bypassed);
+
+        graph.set_node_enabled(id, false);
+        assert!(!graph.get_node(id).unwrap().enabled);
+
+        graph.set_node_bypassed(id, true);
+        assert!(graph.get_node(id).unwrap().bypassed);
+    }
+
+    #[test]
+    fn test_already_connected() {
+        let mut graph = AudioGraph::new(48000.0, 256);
+        let input_id = graph.add_node(NodeType::AudioInput).unwrap();
+        let gain_id = graph.add_node(NodeType::Gain).unwrap();
+
+        let conn = Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: gain_id,
+            target_port: PortId(0),
+        };
+        graph.connect(conn.clone()).unwrap();
+        let result = graph.connect(conn);
+        assert!(matches!(result, Err(GraphError::AlreadyConnected)));
+    }
+
+    #[test]
+    fn test_connect_nonexistent_node() {
+        let mut graph = AudioGraph::new(48000.0, 256);
+        let result = graph.connect(Connection {
+            source_node: NodeId(999),
+            source_port: PortId(0),
+            target_node: NodeId(998),
+            target_port: PortId(0),
+        });
+        assert!(matches!(result, Err(GraphError::NotFound)));
     }
 }

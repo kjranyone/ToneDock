@@ -7,7 +7,7 @@ use vst3::Steinberg::Vst::{
     Sample32,
 };
 use vst3::Steinberg::{
-    kResultOk, IPluginBaseTrait, IPluginFactory, IPluginFactoryTrait, PClassInfo, TBool,
+    IPluginBaseTrait, IPluginFactory, IPluginFactoryTrait, PClassInfo, TBool, kResultOk,
 };
 use vst3::{ComPtr, Interface};
 

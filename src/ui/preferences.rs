@@ -1,6 +1,6 @@
 use egui::*;
 
-use crate::audio::engine::{enumerate_hosts, AudioConfigInfo, AudioDeviceInfo, AudioHostInfo};
+use crate::audio::engine::{AudioConfigInfo, AudioDeviceInfo, AudioHostInfo, enumerate_hosts};
 use crate::vst_host::scanner::PluginInfo;
 
 pub enum PreferencesTab {

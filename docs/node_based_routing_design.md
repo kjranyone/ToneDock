@@ -731,34 +731,34 @@ fn migrate_legacy_session(legacy: LegacySession) -> Session {
 
 ### Phase 1: コアデータ構造（1〜2週間）
 
-- [ ] `src/audio/node.rs` — `NodeId`, `PortId`, `Port`, `NodeType`, `NodeInternalState`
-- [ ] `src/audio/graph.rs` — `AudioGraph`, `Connection`, `GraphNode`
-- [ ] トポロジカルソートの実装
-- [ ] バッファ管理（割り当て・ミキシング）
-- [ ] 単体テスト（サイクル検出、ソート順序、バッファ割り当て）
+- [x] `src/audio/node.rs` — `NodeId`, `PortId`, `Port`, `NodeType`, `NodeInternalState`
+- [x] `src/audio/graph.rs` — `AudioGraph`, `Connection`, `GraphNode`
+- [x] トポロジカルソートの実装
+- [x] バッファ管理（割り当て・ミキシング）
+- [x] 単体テスト（サイクル検出、ソート順序、バッファ割り当て）
 
 ### Phase 2: エンジン統合（1〜2週間）
 
-- [ ] `AudioEngine` の `Chain` を `AudioGraph` に置換
-- [ ] Command Queue パターンの実装
-- [ ] ダブルバッファ戦略の実装
-- [ ] 現行のLooper/Metronomeをノード化
-- [ ] 後方互換セッション読み込み
+- [x] `AudioEngine` の `Chain` を `AudioGraph` に置換
+- [x] Command Queue パターンの実装
+- [x] ダブルバッファ戦略の実装
+- [x] 現行のLooper/Metronomeをノード化
+- [x] 後方互換セッション読み込み
 
 ### Phase 3: ノードエディタUI（2〜3週間）
 
-- [ ] `src/ui/node_editor.rs` — キャンバスベースのノードエディタ
-- [ ] ポートのドラッグ＆ドロップ接続
-- [ ] コンテキストメニュー（ノード追加/削除）
-- [ ] ノードのパラメータ表示・編集
-- [ ] ズーム/パン操作
-- [ ] Rack View ↔ Node Editor 切替
+- [x] `src/ui/node_editor.rs` — キャンバスベースのノードエディタ
+- [x] ポートのドラッグ＆ドロップ接続
+- [x] コンテキストメニュー（ノード追加/削除）
+- [x] ノードのパラメータ表示・編集
+- [x] ズーム/パン操作
+- [x] Rack View ↔ Node Editor 切替
 
 ### Phase 4: 高度なルーティング（1〜2週間）
 
-- [ ] Splitter / Mixer ノードの実装
-- [ ] Pan ノードの実装（等パワーパンニング）
-- [ ] 自動チャンネル変換（Mono↔Stereo 暗黙変換）
+- [x] Splitter / Mixer ノードの実装
+- [x] Pan ノードの実装（等パワーパンニング）
+- [x] 自動チャンネル変換（Mono↔Stereo 暗黙変換）
 - [ ] Send/Return バス（将来的）
 - [ ] Wet/Dry ノード（ミックス比制御）
 - [ ] パラレルチェーンのテンプレート
