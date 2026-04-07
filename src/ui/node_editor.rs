@@ -12,15 +12,14 @@ const HIT_R: f32 = 10.0;
 const PARAM_ROW: f32 = 24.0;
 const PARAM_SENSITIVITY: f32 = 0.01;
 
-const COL_NODE_BG: Color32 = Color32::from_rgb(50, 50, 60);
-const COL_NODE_HDR: Color32 = Color32::from_rgb(40, 40, 50);
+const COL_NODE_BG: Color32 = Color32::from_rgb(34, 34, 42);
+const COL_NODE_HDR: Color32 = Color32::from_rgb(46, 46, 56);
 const COL_PORT_MONO: Color32 = Color32::from_rgb(220, 180, 50);
 const COL_PORT_STEREO: Color32 = Color32::from_rgb(50, 180, 220);
-const COL_CONN: Color32 = Color32::from_rgb(140, 140, 160);
-const COL_CONN_HOVER: Color32 = Color32::from_rgb(220, 80, 80);
-const COL_GRID: Color32 = Color32::from_rgb(38, 38, 45);
-const COL_PARAM_BG: Color32 = Color32::from_rgb(35, 35, 45);
-const COL_PARAM_FILL: Color32 = Color32::from_rgb(70, 100, 160);
+const COL_CONN: Color32 = Color32::from_rgb(120, 110, 140);
+const COL_CONN_HOVER: Color32 = Color32::from_rgb(240, 90, 90);
+const COL_GRID: Color32 = Color32::from_rgb(28, 28, 34);
+const COL_PARAM_BG: Color32 = Color32::from_rgb(26, 26, 34);
 
 pub struct NodeSnap {
     pub id: NodeId,
@@ -433,11 +432,11 @@ impl NodeEditor {
         };
 
         p.rect_filled(
-            r.translate(vec2(2.0, 2.0)),
-            4.0,
-            Color32::from_black_alpha(50),
+            r.translate(vec2(0.0, 3.0)),
+            8.0,
+            Color32::from_black_alpha(40),
         );
-        p.rect_filled(r, 4.0, bg);
+        p.rect_filled(r, 8.0, bg);
 
         let hdr_r = Rect::from_min_max(r.min, pos2(r.right(), r.min.y + HDR_H * z));
         let hdr_col = if selected {
@@ -445,20 +444,20 @@ impl NodeEditor {
         } else {
             COL_NODE_HDR
         };
-        p.rect_filled(hdr_r, 4.0, hdr_col);
+        p.rect_filled(hdr_r, 8.0, hdr_col);
 
         if selected {
             p.rect_stroke(
                 r,
-                4.0,
+                8.0,
                 Stroke::new(2.0, crate::ui::theme::ACCENT),
                 egui::StrokeKind::Outside,
             );
         } else {
             p.rect_stroke(
                 r,
-                4.0,
-                Stroke::new(1.0, Color32::from_rgb(70, 70, 80)),
+                8.0,
+                Stroke::new(1.0, crate::ui::theme::OUTLINE_VAR),
                 egui::StrokeKind::Outside,
             );
         }
@@ -525,7 +524,7 @@ impl NodeEditor {
                     pos2(param_r.min.x, param_r.min.y),
                     pos2(param_r.max.x, param_r.min.y),
                 ],
-                Stroke::new(1.0, Color32::from_rgb(60, 60, 70)),
+                Stroke::new(1.0, crate::ui::theme::DIVIDER),
             );
             p.rect_filled(param_r, 0.0, COL_PARAM_BG);
 
@@ -552,8 +551,8 @@ impl NodeEditor {
                         bar_rect.min,
                         pos2(bar_rect.min.x + fill_w, bar_rect.max.y),
                     );
-                    p.rect_filled(bar_rect, 2.0, Color32::from_rgb(25, 25, 35));
-                    p.rect_filled(fill_r, 2.0, COL_PARAM_FILL);
+                    p.rect_filled(bar_rect, 4.0, Color32::from_rgb(20, 20, 28));
+                    p.rect_filled(fill_r, 4.0, crate::ui::theme::ACCENT_DIM);
                     p.text(
                         pos2(param_r.min.x + padding, bar_rect.min.y - param_fs - 1.0 * z),
                         Align2::LEFT_BOTTOM,
@@ -569,8 +568,8 @@ impl NodeEditor {
                         bar_rect.min,
                         pos2(bar_rect.min.x + fill_w, bar_rect.max.y),
                     );
-                    p.rect_filled(bar_rect, 2.0, Color32::from_rgb(25, 25, 35));
-                    p.rect_filled(fill_r, 2.0, COL_PARAM_FILL);
+                    p.rect_filled(bar_rect, 4.0, Color32::from_rgb(20, 20, 28));
+                    p.rect_filled(fill_r, 4.0, crate::ui::theme::ACCENT_DIM);
                     let label = if value < -0.01 {
                         format!("L {:.2}", value.abs())
                     } else if value > 0.01 {
@@ -593,8 +592,8 @@ impl NodeEditor {
                         bar_rect.min,
                         pos2(bar_rect.min.x + fill_w, bar_rect.max.y),
                     );
-                    p.rect_filled(bar_rect, 2.0, Color32::from_rgb(25, 25, 35));
-                    p.rect_filled(fill_r, 2.0, COL_PARAM_FILL);
+                    p.rect_filled(bar_rect, 4.0, Color32::from_rgb(20, 20, 28));
+                    p.rect_filled(fill_r, 4.0, crate::ui::theme::ACCENT_DIM);
                     let label = format!("Wet {:.0}%", value * 100.0);
                     p.text(
                         pos2(param_r.min.x + padding, bar_rect.min.y - param_fs - 1.0 * z),
@@ -611,8 +610,8 @@ impl NodeEditor {
                         bar_rect.min,
                         pos2(bar_rect.min.x + fill_w, bar_rect.max.y),
                     );
-                    p.rect_filled(bar_rect, 2.0, Color32::from_rgb(25, 25, 35));
-                    p.rect_filled(fill_r, 2.0, COL_PARAM_FILL);
+                    p.rect_filled(bar_rect, 4.0, Color32::from_rgb(20, 20, 28));
+                    p.rect_filled(fill_r, 4.0, crate::ui::theme::ACCENT_DIM);
                     let label = format!("Send {:.0}%", value * 100.0);
                     p.text(
                         pos2(param_r.min.x + padding, bar_rect.min.y - param_fs - 1.0 * z),

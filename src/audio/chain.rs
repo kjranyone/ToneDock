@@ -1,3 +1,4 @@
+use crate::vst_host::editor::PluginEditor;
 use crate::vst_host::plugin::LoadedPlugin;
 use crate::vst_host::scanner::{PluginInfo, PluginScanner};
 
@@ -12,6 +13,7 @@ pub struct PluginSlot {
     pub instance: Option<LoadedPlugin>,
     pub enabled: bool,
     pub bypassed: bool,
+    pub editor: PluginEditor,
 }
 
 pub struct Chain {
@@ -44,6 +46,7 @@ impl Chain {
             instance: Some(plugin),
             enabled: true,
             bypassed: false,
+            editor: PluginEditor::new(),
         };
         self.slots.push(slot);
         log::info!(

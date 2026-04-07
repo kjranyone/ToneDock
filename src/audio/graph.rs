@@ -370,6 +370,30 @@ impl AudioGraph {
         Ok(id)
     }
 
+    pub fn add_node_with_id(&mut self, id: NodeId, node_type: NodeType) -> Result<(), GraphError> {
+        if node_type.is_singleton() {
+            if matches!(node_type, NodeType::AudioInput) && self.input_node_id.is_some() {
+                return Err(GraphError::SingletonViolation);
+            }
+            if matches!(node_type, NodeType::AudioOutput) && self.output_node_id.is_some() {
+                return Err(GraphError::SingletonViolation);
+            }
+        }
+        if self.nodes.contains_key(&id) {
+            return Err(GraphError::SingletonViolation);
+        }
+        let node = GraphNode::new(id, node_type.clone(), self.max_frames);
+        match node_type {
+            NodeType::AudioInput => self.input_node_id = Some(id),
+            NodeType::AudioOutput => self.output_node_id = Some(id),
+            _ => {}
+        }
+        self.next_node_id = self.next_node_id.max(id.0 + 1);
+        self.nodes.insert(id, node);
+        self.topology_dirty = true;
+        Ok(())
+    }
+
     pub fn remove_node(&mut self, id: NodeId) {
         if self.nodes.remove(&id).is_some() {
             if self.input_node_id == Some(id) {
@@ -2241,6 +2265,101 @@ mod tests {
             assert!(
                 (output[0][i] - 1.0).abs() < 0.01,
                 "Zero send should give only thru signal at sample {}: got {}",
+                i,
+                output[0][i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_add_node_with_id() {
+        let mut graph = AudioGraph::new(48000.0, 256);
+        let _ = graph.add_node(NodeType::AudioInput).unwrap();
+        let _ = graph.add_node(NodeType::AudioOutput).unwrap();
+
+        graph.add_node_with_id(NodeId(10), NodeType::Gain).unwrap();
+        assert!(graph.get_node(NodeId(10)).is_some());
+
+        let node = graph.get_node(NodeId(10)).unwrap();
+        assert!(matches!(node.node_type, NodeType::Gain));
+    }
+
+    #[test]
+    fn test_add_node_with_id_updates_next_id() {
+        let mut graph = AudioGraph::new(48000.0, 256);
+        graph.add_node_with_id(NodeId(100), NodeType::Gain).unwrap();
+        let next = graph.add_node(NodeType::Pan).unwrap();
+        assert!(next.0 > 100, "next_node_id should be > 100, got {}", next.0);
+    }
+
+    #[test]
+    fn test_undo_remove_node_restore() {
+        let mut graph = AudioGraph::new(48000.0, 256);
+        let input_id = graph.add_node(NodeType::AudioInput).unwrap();
+        let gain_id = graph.add_node(NodeType::Gain).unwrap();
+        let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
+
+        graph
+            .connect(Connection {
+                source_node: input_id,
+                source_port: PortId(0),
+                target_node: gain_id,
+                target_port: PortId(0),
+            })
+            .unwrap();
+        graph
+            .connect(Connection {
+                source_node: gain_id,
+                source_port: PortId(0),
+                target_node: output_id,
+                target_port: PortId(0),
+            })
+            .unwrap();
+
+        graph.set_node_internal_state(gain_id, NodeInternalState::Gain { value: 1.5 });
+        graph.set_node_position(gain_id, 100.0, 200.0);
+        graph.commit_topology().unwrap();
+
+        graph.remove_node(gain_id);
+        assert!(graph.get_node(gain_id).is_none());
+        assert_eq!(graph.connections().len(), 0);
+
+        graph.add_node_with_id(gain_id, NodeType::Gain).unwrap();
+        graph.set_node_position(gain_id, 100.0, 200.0);
+        graph.set_node_internal_state(gain_id, NodeInternalState::Gain { value: 1.5 });
+        graph
+            .connect(Connection {
+                source_node: input_id,
+                source_port: PortId(0),
+                target_node: gain_id,
+                target_port: PortId(0),
+            })
+            .unwrap();
+        graph
+            .connect(Connection {
+                source_node: gain_id,
+                source_port: PortId(0),
+                target_node: output_id,
+                target_port: PortId(0),
+            })
+            .unwrap();
+        graph.commit_topology().unwrap();
+
+        assert!(graph.get_node(gain_id).is_some());
+        let node = graph.get_node(gain_id).unwrap();
+        assert_eq!(node.position, (100.0, 200.0));
+        assert!(matches!(
+            node.internal_state,
+            NodeInternalState::Gain { value: 1.5 }
+        ));
+        assert_eq!(graph.connections().len(), 2);
+
+        let input = vec![vec![1.0f32; 256]];
+        let output = graph.process(&input, 256);
+        for i in 0..10 {
+            assert!(
+                (output[0][i] - 1.5).abs() < 0.01,
+                "Restored gain node should apply gain at sample {}: got {}",
                 i,
                 output[0][i]
             );

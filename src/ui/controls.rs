@@ -1,3 +1,4 @@
+use crate::ui::theme::*;
 use egui::*;
 
 pub fn draw_knob(ui: &mut Ui, value: &mut f32, label: &str, min: f32, max: f32, size: f32) -> bool {
@@ -16,7 +17,7 @@ pub fn draw_knob(ui: &mut Ui, value: &mut f32, label: &str, min: f32, max: f32, 
 
     let painter = ui.painter_at(rect);
     let center = rect.center();
-    let radius = size * 0.4;
+    let radius = size * 0.38;
 
     let normalized = if (max - min).abs() < f32::EPSILON {
         0.0
@@ -24,13 +25,12 @@ pub fn draw_knob(ui: &mut Ui, value: &mut f32, label: &str, min: f32, max: f32, 
         (*value - min) / (max - min)
     };
 
-    let bg_color = crate::ui::theme::KNOB_TRACK;
     let fg_color = if *value > max * 0.85 {
-        crate::ui::theme::METER_RED
+        METER_RED
     } else if *value > max * 0.65 {
-        crate::ui::theme::METER_YELLOW
+        METER_YELLOW
     } else {
-        crate::ui::theme::ACCENT
+        ACCENT
     };
 
     let start_angle = std::f32::consts::FRAC_PI_4 * 5.0;
@@ -38,13 +38,23 @@ pub fn draw_knob(ui: &mut Ui, value: &mut f32, label: &str, min: f32, max: f32, 
     let sweep = start_angle - end_angle;
     let value_angle = start_angle - normalized * sweep;
 
+    painter.circle_filled(
+        center + vec2(0.0, 2.0),
+        radius + 6.0,
+        Color32::from_black_alpha(40),
+    );
+
+    painter.circle_filled(center, radius + 5.0, SURFACE_CONTAINER_HIGH);
+
+    painter.circle_filled(center, radius + 3.0, SURFACE_CONTAINER);
+
     draw_arc_segment(
         &painter,
         center,
         radius,
         end_angle,
         start_angle,
-        Stroke::new(3.0, bg_color),
+        Stroke::new(5.0, KNOB_TRACK),
     );
 
     if normalized > 0.001 {
@@ -54,24 +64,26 @@ pub fn draw_knob(ui: &mut Ui, value: &mut f32, label: &str, min: f32, max: f32, 
             radius,
             value_angle,
             start_angle,
-            Stroke::new(3.0, fg_color),
+            Stroke::new(5.0, fg_color),
         );
     }
 
-    let indicator_len = radius * 0.7;
-    let ix = center.x + indicator_len * value_angle.cos();
-    let iy = center.y - indicator_len * value_angle.sin();
-    painter.line_segment(
-        [center, Pos2::new(ix, iy)],
-        Stroke::new(2.0, crate::ui::theme::TEXT_PRIMARY),
+    let dot_r = 4.0;
+    let ix = center.x + radius * value_angle.cos();
+    let iy = center.y - radius * value_angle.sin();
+    painter.circle_filled(
+        Pos2::new(ix, iy) + vec2(0.0, 1.0),
+        dot_r + 1.0,
+        Color32::from_black_alpha(30),
     );
+    painter.circle_filled(Pos2::new(ix, iy), dot_r, fg_color);
 
     painter.text(
-        Pos2::new(center.x, rect.bottom() - 8.0),
+        Pos2::new(center.x, rect.bottom() - 6.0),
         Align2::CENTER_BOTTOM,
         label,
         FontId::proportional(9.0),
-        crate::ui::theme::TEXT_SECONDARY,
+        TEXT_SECONDARY,
     );
 
     let val_text = format!("{:.2}", value);
@@ -80,7 +92,7 @@ pub fn draw_knob(ui: &mut Ui, value: &mut f32, label: &str, min: f32, max: f32, 
         Align2::CENTER_CENTER,
         val_text,
         FontId::proportional(8.0),
-        crate::ui::theme::TEXT_PRIMARY,
+        TEXT_PRIMARY,
     );
 
     changed
@@ -111,7 +123,7 @@ fn draw_arc_segment(
 }
 
 pub fn draw_toggle(ui: &mut Ui, _label: &str, on: bool, size: f32) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(size * 2.0, size), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(size * 2.2, size), Sense::click());
 
     if response.clicked() {
         return true;
@@ -119,29 +131,61 @@ pub fn draw_toggle(ui: &mut Ui, _label: &str, on: bool, size: f32) -> bool {
 
     let painter = ui.painter_at(rect);
     let center = rect.center();
-    let radius = size * 0.4;
+    let track_height = size * 0.6;
+    let track_r = CornerRadius::same((track_height / 2.0) as u8);
+    let thumb_r = size * 0.32;
+
+    let track_rect = Rect::from_center_size(center, Vec2::new(rect.width() - 6.0, track_height));
 
     painter.rect_filled(
-        rect.shrink(2.0),
-        CornerRadius::same(radius as u8),
-        if on {
-            crate::ui::theme::ACCENT_DIM
-        } else {
-            crate::ui::theme::KNOB_TRACK
-        },
+        track_rect.translate(vec2(0.0, 1.0)),
+        track_r,
+        Color32::from_black_alpha(30),
     );
+
+    if on {
+        painter.rect_filled(track_rect, track_r, ACCENT_DIM);
+
+        let glow_rect = track_rect.shrink(1.0);
+        painter.rect_filled(
+            glow_rect,
+            track_r,
+            Color32::from_rgba_unmultiplied(ACCENT.r(), ACCENT.g(), ACCENT.b(), 40),
+        );
+    } else {
+        painter.rect_filled(track_rect, track_r, OUTLINE_VAR);
+    }
 
     let knob_x = if on {
-        rect.right() - radius - 4.0
+        track_rect.right() - thumb_r - 4.0
     } else {
-        rect.left() + radius + 4.0
+        track_rect.left() + thumb_r + 4.0
     };
 
-    painter.circle_filled(
-        Pos2::new(knob_x, center.y),
-        radius,
-        crate::ui::theme::TEXT_PRIMARY,
-    );
+    if on {
+        painter.circle_filled(
+            Pos2::new(knob_x, center.y) + vec2(0.0, 1.0),
+            thumb_r + 1.0,
+            Color32::from_black_alpha(30),
+        );
+        painter.circle_filled(Pos2::new(knob_x, center.y), thumb_r, ON_PRIMARY_CONTAINER);
+    } else {
+        painter.circle_filled(
+            Pos2::new(knob_x, center.y) + vec2(0.0, 1.0),
+            thumb_r + 1.0,
+            Color32::from_black_alpha(30),
+        );
+        painter.circle_filled(
+            Pos2::new(knob_x, center.y),
+            thumb_r,
+            SURFACE_CONTAINER_HIGHEST,
+        );
+        painter.circle_stroke(
+            Pos2::new(knob_x, center.y),
+            thumb_r,
+            Stroke::new(1.5, OUTLINE),
+        );
+    }
 
     false
 }

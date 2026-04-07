@@ -1,15 +1,17 @@
 # ToneDock — Handover資料
 
-最終更新: 2026-04-06 17:07 JST
+最終更新: 2026-04-07 08:53 JST
 
 ## プロジェクト概要
 
 **ToneDock** は Rust で書くギター練習用 VST3 ホストアプリです。GPL-3.0 ライセンス。
 
 - リポジトリ: `C:\lib\github\kjranyone\ToneDock`
-- `cargo check` **0 warnings で通ります** / `cargo test` **22テスト全パス**
+- `cargo check` **0 warnings で通ります** / `cargo test` **34テスト全パス**
 - 設計書: `docs/node_based_routing_design.md`
-- 新依存: `arc-swap = "1"` （Phase 2-3で追加）## 現在のアーキテクチャ
+- 新依存: `arc-swap = "1"` （Phase 2-3で追加）
+
+## 現在のアーキテクチャ
 
 ```
 src/
@@ -18,6 +20,7 @@ src/
 ├── metronome.rs          — メトロノーム生成（スタンドアローン）
 ├── looper.rs             — ルーパー（スタンドアローン）
 ├── session.rs            — セッションJSON保存/復元
+├── undo.rs               — Undo/Redoマネージャ（UndoAction, UndoStep, UndoManager）
 ├── audio/
 │   ├── mod.rs
 │   ├── chain.rs          — 従来のプラグインチェーン（後方互換用）
@@ -127,43 +130,6 @@ src/
 **engine.rs UI側のAPI**:
 - `apply_commands_to_staging()` — UIスレッドからコマンドを直接適用してスワップ（ストリーム停止時などに使用）
 - 旧 `drain_pending_commands()` は削除（ロック競合の原因を根本解消）
-
-### テスト結果（22テスト全パス）
-- `test_add_audio_input_output` — シングルトンノードの追加
-- `test_singleton_violation` — 二重追加の拒否
-- `test_connect_and_topology` — トポロジカルソート順序の検証
-- `test_cycle_detection` — サイクル検出
-- `test_remove_node_cleans_connections` — ノード削除時のコネクション整理
-- `test_process_simple_chain` — Input→Output の信号処理
-- `test_process_with_gain` — Gain ノードの信号処理
-- `test_pan_node` — Pan ノードのL/R配分
-- `test_splitter_mixer_parallel` — Splitter→2xGain→Mixer のパラレル処理
-- `test_mono_stereo_auto_conversion_allowed` — 自動チャンネル変換の許可
-- `test_disconnect` — コネクション削除
-- `test_bypass_node` — バイパス時のパススルー
-- `test_disabled_node` — 無効時のサイレント出力
-- `test_set_node_position` — ノード位置設定
-- `test_set_node_enabled_bypassed` — 有効/バイパス切替
-- `test_already_connected` — 重複接続の拒否
-- `test_connect_nonexistent_node` — 存在しないノードへの接続拒否
-- `test_session_default_has_no_graph` — デフォルトセッションにグラフなし
-- `test_session_roundtrip` — セッション保存→読み込みの一貫性
-- `test_legacy_migration` — 旧チェーン→グラフ自動マイグレーション
-- `test_empty_chain_no_migration` — 空チェーンではマイグレーションなし
-- `test_legacy_migration_chain_order` — マイグレーション接続順序の検証
-
-### Phase 2 残り 〜 Phase 4: 未実装
-
-| Phase | 内容 | 状態 |
-|-------|------|------|
-| 2-3 | ダブルバッファ戦略（arc_swap、ロックフリー処理） | ✅ 完了 |
-| 2-4 | Looper/Metronome のノード化 | ✅ 完了 |
-| 2-5 | 後方互換セッション読み込み | ✅ 完了 |
-| 3-1 | ノードエディタUI（基礎） | ✅ 完了 |
-| 3-2 | ノードエディタUI（パラメータ編集・接続削除・複製・ズームフィット） | ✅ 完了 |
-| 3-3 | ノードエディタUI（VSTプラグイン統合） | ✅ 完了 |
-| Phase 4 | セッション保存/復元・マイグレーション | ✅ 完了 |
-| Phase 4b | 高度なルーティング（Send/Return, Wet/Dry, テンプレート） | ✅ 完了 |
 
 ### Phase 3-1: ノードエディタUI（基礎） ✅ 完了
 
@@ -368,16 +334,86 @@ src/
   - `parallel_chain` — Splitter→2x Gain→Mixer
 - `process_editor_commands()` に `EdCmd::ApplyTemplate` ハンドラ追加
 
+### Phase 5: Undo/Redo ✅ 完了
+
+**src/undo.rs** — Undo/Redoシステム:
+- `UndoAction` — 操作の可逆アクション列挙型:
+  - `AddedNode` — ノード追加（undo: 削除, redo: 再追加）
+  - `RemovedNode` — ノード削除（undo: 復元+再接続, redo: 再削除）
+  - `Connected` / `Disconnected` — 接続/切断（相互反転）
+  - `MovedNode` — ノード移動（old_pos ↔ new_pos）
+  - `ChangedState` — パラメータ変更（old_state ↔ new_state）
+  - `ChangedBypass` — バイパス切替（old ↔ new）
+- `UndoStep` — 1つのundoステップ（ラベル、アクションリスト、連続フラグ）
+- `UndoManager` — undo/redoスタック管理:
+  - `push()` — 新しいステップを記録（連続操作は同一ノードなら自動マージ）
+  - `pop_undo()` / `pop_redo()` — スタックから取出し（相互にスタックを移動）
+  - `can_undo()` / `can_redo()` — 利用可能判定
+  - `clear()` — スタッククリア
+
+**src/audio/graph.rs 変更点**:
+- `add_node_with_id(id, node_type)` — 指定IDでノードを追加（undo復元用）
+  - ID衝突チェック付き
+  - `next_node_id` を `id.0 + 1` 以上に更新（将来のID衝突防止）
+  - シングルトン制約も適用
+
+**src/audio/engine.rs 変更点**:
+- `execute_undo_actions(actions)` — undoアクションをグラフに適用:
+  - clone → アクション適用 → commit_topology → store
+  - `RemovedNode` は add_node_with_id + 位置・状態・接続復元
+  - アクションリストは**逆順**で実行（app.rs側で制御）
+- `execute_redo_actions(actions)` — redoアクションをグラフに適用:
+  - 同じclone → 適用 → commit → store パターン
+  - `AddedNode` は add_node_with_id + 位置設定
+
+**src/audio/node.rs 変更点**:
+- `NodeType`, `NodeInternalState`, `Connection`, `MetronomeNodeState`, `LooperNodeState` に `PartialEq` derive を追加（テスト比較用）
+
+**src/app.rs 変更点**:
+- `ToneDockApp` に `undo_manager: UndoManager` フィールド追加
+- `process_editor_commands()` — 各EdCmd実行前に「前状態」をキャプチャ:
+  - `AddNode` → `AddedNode` アクション記録
+  - `RemoveNode` → `RemovedNode`（タイプ、位置、状態、全接続を保存）
+  - `Connect` → `Connected`
+  - `Disconnect` → `Disconnected`
+  - `SetPos` → `MovedNode`（old_pos, new_pos）
+  - `SetState` → `ChangedState`（old_state, new_state）、連続フラグ設定
+  - `ToggleBypass` → `ChangedBypass`
+  - `DuplicateNode` → `AddedNode`（新ノード用）
+- アクションラベル自動生成（Add Node / Remove Node / Connect / Disconnect / Move Node / Change Parameter / Edit）
+- **パラメータドラッグの自動マージ**: 同一ノードへの連続 `SetState` は1つのundoステップに統合
+- `perform_undo()` — `pop_undo()` → アクション逆順 → `execute_undo_actions()`
+- `perform_redo()` — `pop_redo()` → `execute_redo_actions()`
+- **キーボードショートカット**:
+  - `Ctrl+Z` → Undo
+  - `Ctrl+Shift+Z` / `Ctrl+Y` → Redo
+- **ツールバーボタン**: ↩ Undo / ↪ Redo（disabled state対応）
+
+**src/main.rs 変更点**:
+- `mod undo;` 追加
+
+### テスト結果（34テスト全パス）
+
+従来26テスト + 新規8テスト:
+- `test_add_node_with_id` — 指定IDでのノード追加
+- `test_add_node_with_id_updates_next_id` — next_node_idの自動更新検証
+- `test_undo_remove_node_restore` — ノード削除→復元の完全検証（接続・状態・信号処理）
+- `test_undo_manager_push_and_pop` — UndoManager基本動作
+- `test_undo_clears_redo_on_push` — 新操作時のredoスタッククリア
+- `test_continuous_coalescing` — パラメータドラッグの自動マージ
+- `test_continuous_no_coalesce_different_node` — 異ノード間の非マージ
+- `test_clear` — UndoManagerクリア
+
 ## 次にやること
 
-すべての設計フェーズ（Phase 1〜4）は完了。以下は今後の改善候補。
+すべての設計フェーズ（Phase 1〜5）は完了。以下は今後の改善候補。
 
 ### その他の改善候補
 
 - **Rack View ↔ Node Editor 双方向同期** — 現在は独立して操作可能。同じ AudioGraph を操作する異なるビューとして統合
-- **Undo/Redo** — グラフ操作の履歴管理
 - **ノードエディタのマルチ選択** — 複数ノードの同時移動・削除
 - **VST パラメータオートメーション** — パラメータの時間変化記録
+- **Undo/Redo 拡張** — VSTプラグイン読み込みのundo対応（現在はノード削除のみundo可）
 
 ## 技術的メモ
 

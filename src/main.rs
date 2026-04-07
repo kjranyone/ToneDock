@@ -1,13 +1,15 @@
 mod app;
 mod audio;
+mod crash_logger;
 mod looper;
 mod metronome;
 mod session;
 mod ui;
+mod undo;
 mod vst_host;
 
 fn main() -> eframe::Result<()> {
-    env_logger::init();
+    crash_logger::init();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

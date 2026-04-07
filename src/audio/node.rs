@@ -29,7 +29,7 @@ impl ChannelConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeType {
     AudioInput,
     AudioOutput,
@@ -244,7 +244,7 @@ pub struct Port {
     pub channels: ChannelConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeInternalState {
     None,
     Metronome(MetronomeNodeState),
@@ -261,13 +261,13 @@ impl Default for NodeInternalState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetronomeNodeState {
     pub bpm: f64,
     pub volume: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LooperNodeState {
     pub enabled: bool,
     pub recording: bool,
@@ -318,7 +318,7 @@ impl Default for SerializedGraph {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Connection {
     pub source_node: NodeId,
     pub source_port: PortId,

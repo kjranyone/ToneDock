@@ -12,6 +12,7 @@ use crate::session::Session;
 use crate::ui::node_editor::{EdCmd, NodeEditor, NodeSnap};
 use crate::ui::preferences::{PreferencesResult, PreferencesState};
 use crate::ui::rack_view::RackView;
+use crate::undo::{UndoAction, UndoManager, UndoStep};
 use crate::vst_host::scanner::PluginInfo;
 
 enum ViewMode {
@@ -27,6 +28,7 @@ pub struct ToneDockApp {
     available_plugins: Vec<PluginInfo>,
     custom_plugin_paths: Vec<std::path::PathBuf>,
     session: Session,
+    undo_manager: UndoManager,
 
     metronome_enabled: bool,
     metronome_bpm: f64,
@@ -48,11 +50,13 @@ pub struct ToneDockApp {
 
     master_volume: f32,
     input_gain: f32,
+    main_hwnd: Option<std::ptr::NonNull<std::ffi::c_void>>,
 }
 
 impl ToneDockApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::ui::theme::apply_fonts(&cc.egui_ctx);
+        crate::ui::theme::apply_style(&cc.egui_ctx);
 
         let audio_engine = AudioEngine::new().unwrap_or_else(|e| {
             log::error!("Failed to create audio engine: {}", e);
@@ -67,6 +71,7 @@ impl ToneDockApp {
             available_plugins: Vec::new(),
             custom_plugin_paths: Vec::new(),
             session: Session::default(),
+            undo_manager: UndoManager::new(),
             metronome_enabled: false,
             metronome_bpm: 120.0,
             metronome_volume: 0.5,
@@ -83,6 +88,7 @@ impl ToneDockApp {
             preferences_state: None,
             master_volume: 0.8,
             input_gain: 1.0,
+            main_hwnd: None,
         };
 
         app.scan_plugins();
@@ -243,184 +249,353 @@ impl ToneDockApp {
             self.audio_engine.output_channels,
         ));
     }
+
+    fn perform_undo(&mut self) {
+        if let Some(step) = self.undo_manager.pop_undo() {
+            let actions: Vec<UndoAction> = step.actions.into_iter().rev().collect();
+            self.audio_engine.execute_undo_actions(&actions);
+            self.status_message = format!("Undo: {}", step.label);
+        }
+    }
+
+    fn perform_redo(&mut self) {
+        if let Some(step) = self.undo_manager.pop_redo() {
+            self.audio_engine.execute_redo_actions(&step.actions);
+            self.status_message = format!("Redo: {}", step.label);
+        }
+    }
 }
 
 impl App for ToneDockApp {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        ctx.set_visuals(Visuals {
-            dark_mode: true,
-            override_text_color: Some(crate::ui::theme::TEXT_PRIMARY),
-            ..Visuals::dark()
-        });
+    fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
+        if self.main_hwnd.is_none() {
+            if let Ok(hwnd) = crate::vst_host::editor::extract_hwnd_from_frame(frame) {
+                self.main_hwnd = std::ptr::NonNull::new(hwnd);
+            }
+        }
 
-        TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("ToneDock")
-                        .size(16.0)
-                        .color(crate::ui::theme::ACCENT)
-                        .strong(),
-                );
-                ui.separator();
+        let toolbar_fill = crate::ui::theme::SURFACE_CONTAINER;
 
-                if ui.button("Save Session").clicked() {
-                    self.save_session();
-                }
-                if ui.button("Load Session").clicked() {
-                    self.load_session();
-                }
-                ui.separator();
-
-                if ui.button("Preferences...").clicked() {
-                    self.open_preferences();
-                }
-
-                let running = self.audio_engine.is_running();
-                let label = if running { "Stop Audio" } else { "Start Audio" };
-                if ui.button(label).clicked() {
-                    if running {
-                        self.audio_engine.stop();
-                    } else {
-                        self.start_audio();
-                    }
-                }
-
-                ui.separator();
-
-                let view_label = match self.view_mode {
-                    ViewMode::Rack => "Node Editor",
-                    ViewMode::NodeEditor => "Rack View",
-                };
-                if ui.button(view_label).clicked() {
-                    self.view_mode = match self.view_mode {
-                        ViewMode::Rack => ViewMode::NodeEditor,
-                        ViewMode::NodeEditor => ViewMode::Rack,
-                    };
-                }
-
-                if ui.button("About").clicked() {
-                    self.show_about = true;
-                }
-
-                ui.separator();
-
-                ui.label("Master:");
-                let mut vol = self.master_volume;
-                ui.add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false));
-                if (vol - self.master_volume).abs() > 0.001 {
-                    self.master_volume = vol;
-                    *self.audio_engine.master_volume.lock() = vol;
-                }
-
-                ui.label("Gain:");
-                let mut gain = self.input_gain;
-                ui.add(egui::DragValue::new(&mut gain).speed(0.01).range(0.0..=4.0));
-                if (gain - self.input_gain).abs() > 0.001 {
-                    self.input_gain = gain;
-                    *self.audio_engine.input_gain.lock() = gain;
-                }
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        TopBottomPanel::top("toolbar")
+            .exact_height(48.0)
+            .frame(egui::Frame {
+                fill: toolbar_fill,
+                inner_margin: Margin::symmetric(12, 6),
+                stroke: Stroke::new(1.0, crate::ui::theme::OUTLINE_VAR),
+                ..Default::default()
+            })
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(&self.status_message)
+                        RichText::new("ToneDock")
+                            .size(18.0)
+                            .color(crate::ui::theme::ACCENT)
+                            .strong(),
+                    );
+                    ui.add_space(8.0);
+
+                    ui.separator();
+
+                    if ui.button("Save").clicked() {
+                        self.save_session();
+                    }
+                    if ui.button("Load").clicked() {
+                        self.load_session();
+                    }
+
+                    if ui.button("Settings").clicked() {
+                        self.open_preferences();
+                    }
+
+                    let running = self.audio_engine.is_running();
+                    let label = if running { "Stop" } else { "Start" };
+                    if ui.button(label).clicked() {
+                        if running {
+                            self.audio_engine.stop();
+                        } else {
+                            self.start_audio();
+                        }
+                    }
+
+                    let view_label = match self.view_mode {
+                        ViewMode::Rack => "Node Editor",
+                        ViewMode::NodeEditor => "Rack View",
+                    };
+                    if ui.button(view_label).clicked() {
+                        self.view_mode = match self.view_mode {
+                            ViewMode::Rack => ViewMode::NodeEditor,
+                            ViewMode::NodeEditor => ViewMode::Rack,
+                        };
+                    }
+
+                    if ui.button("About").clicked() {
+                        self.show_about = true;
+                    }
+
+                    let can_undo = self.undo_manager.can_undo();
+                    let can_redo = self.undo_manager.can_redo();
+                    ui.add_enabled_ui(can_undo, |ui| {
+                        if ui.button("\u{21a9}").clicked() {
+                            self.perform_undo();
+                        }
+                    });
+                    ui.add_enabled_ui(can_redo, |ui| {
+                        if ui.button("\u{21aa}").clicked() {
+                            self.perform_redo();
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    ui.label(
+                        RichText::new("Master")
                             .size(10.0)
                             .color(crate::ui::theme::TEXT_SECONDARY),
                     );
+                    let mut vol = self.master_volume;
+                    ui.add(
+                        egui::Slider::new(&mut vol, 0.0..=1.0)
+                            .show_value(false)
+                            .trailing_fill(true),
+                    );
+                    if (vol - self.master_volume).abs() > 0.001 {
+                        self.master_volume = vol;
+                        *self.audio_engine.master_volume.lock() = vol;
+                    }
+
+                    ui.label(
+                        RichText::new("Gain")
+                            .size(10.0)
+                            .color(crate::ui::theme::TEXT_SECONDARY),
+                    );
+                    let mut gain = self.input_gain;
+                    ui.add(egui::DragValue::new(&mut gain).speed(0.01).range(0.0..=4.0));
+                    if (gain - self.input_gain).abs() > 0.001 {
+                        self.input_gain = gain;
+                        *self.audio_engine.input_gain.lock() = gain;
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(&self.status_message)
+                                .size(10.0)
+                                .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+                    });
                 });
             });
-        });
 
-        TopBottomPanel::bottom("transport").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("METRONOME")
-                        .size(10.0)
-                        .color(crate::ui::theme::ACCENT),
-                );
+        let transport_fill = crate::ui::theme::SURFACE_CONTAINER;
 
-                if crate::ui::controls::draw_toggle(ui, "", self.metronome_enabled, 14.0) {
-                    self.metronome_enabled = !self.metronome_enabled;
-                    if self.metronome_node_id.is_none() && self.metronome_enabled {
-                        self.metronome_node_id = Some(self.audio_engine.add_metronome_node());
+        TopBottomPanel::bottom("transport")
+            .exact_height(44.0)
+            .frame(egui::Frame {
+                fill: transport_fill,
+                inner_margin: Margin::symmetric(12, 6),
+                stroke: Stroke::new(1.0, crate::ui::theme::OUTLINE_VAR),
+                ..Default::default()
+            })
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("METRONOME")
+                            .size(9.0)
+                            .color(crate::ui::theme::ACCENT),
+                    );
+
+                    if crate::ui::controls::draw_toggle(ui, "", self.metronome_enabled, 14.0) {
+                        self.metronome_enabled = !self.metronome_enabled;
+                        if self.metronome_node_id.is_none() && self.metronome_enabled {
+                            self.metronome_node_id = Some(self.audio_engine.add_metronome_node());
+                        }
+                        if let Some(id) = self.metronome_node_id {
+                            self.audio_engine.graph_set_state(
+                                id,
+                                NodeInternalState::Metronome(MetronomeNodeState {
+                                    bpm: self.metronome_bpm,
+                                    volume: self.metronome_volume,
+                                }),
+                            );
+                            self.audio_engine
+                                .graph_set_enabled(id, self.metronome_enabled);
+                            self.audio_engine.graph_commit_topology();
+                        }
                     }
-                    if let Some(id) = self.metronome_node_id {
-                        self.audio_engine.graph_set_state(
-                            id,
-                            NodeInternalState::Metronome(MetronomeNodeState {
-                                bpm: self.metronome_bpm,
-                                volume: self.metronome_volume,
-                            }),
-                        );
-                        self.audio_engine
-                            .graph_set_enabled(id, self.metronome_enabled);
-                        self.audio_engine.graph_commit_topology();
-                    }
-                }
 
-                ui.label("BPM:");
-                let mut bpm = self.metronome_bpm;
-                ui.add(
-                    egui::DragValue::new(&mut bpm)
-                        .speed(1.0)
-                        .range(40.0..=300.0),
-                );
-                if (bpm - self.metronome_bpm).abs() > 0.01 {
-                    self.metronome_bpm = bpm;
-                    if let Some(id) = self.metronome_node_id {
-                        self.audio_engine.graph_set_state(
-                            id,
-                            NodeInternalState::Metronome(MetronomeNodeState {
-                                bpm,
-                                volume: self.metronome_volume,
-                            }),
-                        );
+                    ui.label("BPM:");
+                    let mut bpm = self.metronome_bpm;
+                    ui.add(
+                        egui::DragValue::new(&mut bpm)
+                            .speed(1.0)
+                            .range(40.0..=300.0),
+                    );
+                    if (bpm - self.metronome_bpm).abs() > 0.01 {
+                        self.metronome_bpm = bpm;
+                        if let Some(id) = self.metronome_node_id {
+                            self.audio_engine.graph_set_state(
+                                id,
+                                NodeInternalState::Metronome(MetronomeNodeState {
+                                    bpm,
+                                    volume: self.metronome_volume,
+                                }),
+                            );
+                        }
                     }
-                }
 
-                ui.label("Vol:");
-                let mut vol = self.metronome_volume;
-                ui.add(egui::Slider::new(&mut vol, 0.0..=1.0));
-                if (vol - self.metronome_volume).abs() > 0.001 {
-                    self.metronome_volume = vol;
-                    if let Some(id) = self.metronome_node_id {
-                        self.audio_engine.graph_set_state(
-                            id,
-                            NodeInternalState::Metronome(MetronomeNodeState {
-                                bpm: self.metronome_bpm,
-                                volume: vol,
-                            }),
-                        );
+                    ui.label("Vol:");
+                    let mut vol = self.metronome_volume;
+                    ui.add(egui::Slider::new(&mut vol, 0.0..=1.0));
+                    if (vol - self.metronome_volume).abs() > 0.001 {
+                        self.metronome_volume = vol;
+                        if let Some(id) = self.metronome_node_id {
+                            self.audio_engine.graph_set_state(
+                                id,
+                                NodeInternalState::Metronome(MetronomeNodeState {
+                                    bpm: self.metronome_bpm,
+                                    volume: vol,
+                                }),
+                            );
+                        }
                     }
-                }
 
-                ui.separator();
+                    ui.separator();
 
-                ui.label(
-                    RichText::new("LOOPER")
-                        .size(10.0)
-                        .color(crate::ui::theme::ACCENT),
-                );
+                    ui.label(
+                        RichText::new("LOOPER")
+                            .size(10.0)
+                            .color(crate::ui::theme::ACCENT),
+                    );
 
-                if crate::ui::controls::draw_toggle(ui, "", self.looper_enabled, 14.0) {
-                    self.looper_enabled = !self.looper_enabled;
-                    if self.looper_node_id.is_none() && self.looper_enabled {
-                        self.looper_node_id = Some(self.audio_engine.add_looper_node());
+                    if crate::ui::controls::draw_toggle(ui, "", self.looper_enabled, 14.0) {
+                        self.looper_enabled = !self.looper_enabled;
+                        if self.looper_node_id.is_none() && self.looper_enabled {
+                            self.looper_node_id = Some(self.audio_engine.add_looper_node());
+                        }
+                        if let Some(id) = self.looper_node_id {
+                            self.audio_engine.graph_set_state(
+                                id,
+                                NodeInternalState::Looper(LooperNodeState {
+                                    enabled: self.looper_enabled,
+                                    recording: false,
+                                    playing: false,
+                                    overdubbing: false,
+                                    cleared: false,
+                                }),
+                            );
+                            self.audio_engine.graph_set_enabled(id, self.looper_enabled);
+                            self.audio_engine.graph_commit_topology();
+                        }
+                        if !self.looper_enabled {
+                            self.looper_recording = false;
+                            self.looper_playing = false;
+                            self.looper_overdubbing = false;
+                            if let Some(id) = self.looper_node_id {
+                                self.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::Looper(LooperNodeState {
+                                        enabled: false,
+                                        recording: false,
+                                        playing: false,
+                                        overdubbing: false,
+                                        cleared: true,
+                                    }),
+                                );
+                            }
+                        }
                     }
-                    if let Some(id) = self.looper_node_id {
-                        self.audio_engine.graph_set_state(
-                            id,
-                            NodeInternalState::Looper(LooperNodeState {
-                                enabled: self.looper_enabled,
-                                recording: false,
-                                playing: false,
-                                overdubbing: false,
-                                cleared: false,
-                            }),
-                        );
-                        self.audio_engine.graph_set_enabled(id, self.looper_enabled);
-                        self.audio_engine.graph_commit_topology();
+
+                    let rec_color = if self.looper_recording {
+                        crate::ui::theme::METER_RED
+                    } else {
+                        crate::ui::theme::TEXT_SECONDARY
+                    };
+                    ui.style_mut().visuals.override_text_color = Some(rec_color);
+                    if ui.button("Rec").clicked() {
+                        if self.looper_node_id.is_none() {
+                            self.looper_node_id = Some(self.audio_engine.add_looper_node());
+                        }
+                        self.looper_enabled = true;
+                        self.looper_recording = !self.looper_recording;
+                        self.looper_playing = if self.looper_recording { false } else { true };
+                        if let Some(id) = self.looper_node_id {
+                            self.audio_engine.graph_set_state(
+                                id,
+                                NodeInternalState::Looper(LooperNodeState {
+                                    enabled: true,
+                                    recording: self.looper_recording,
+                                    playing: self.looper_playing,
+                                    overdubbing: false,
+                                    cleared: false,
+                                }),
+                            );
+                            self.audio_engine.graph_set_enabled(id, true);
+                            self.audio_engine.graph_commit_topology();
+                        }
                     }
-                    if !self.looper_enabled {
+                    ui.style_mut().visuals.override_text_color =
+                        Some(crate::ui::theme::TEXT_PRIMARY);
+
+                    let play_color = if self.looper_playing {
+                        crate::ui::theme::METER_GREEN
+                    } else {
+                        crate::ui::theme::TEXT_SECONDARY
+                    };
+                    ui.style_mut().visuals.override_text_color = Some(play_color);
+                    if ui.button("Play").clicked() {
+                        if self.looper_node_id.is_none() {
+                            self.looper_node_id = Some(self.audio_engine.add_looper_node());
+                        }
+                        self.looper_playing = !self.looper_playing;
+                        self.looper_recording = false;
+                        if let Some(id) = self.looper_node_id {
+                            self.audio_engine.graph_set_state(
+                                id,
+                                NodeInternalState::Looper(LooperNodeState {
+                                    enabled: true,
+                                    recording: false,
+                                    playing: self.looper_playing,
+                                    overdubbing: self.looper_overdubbing,
+                                    cleared: false,
+                                }),
+                            );
+                            self.audio_engine.graph_set_enabled(id, true);
+                            self.audio_engine.graph_commit_topology();
+                        }
+                    }
+                    ui.style_mut().visuals.override_text_color =
+                        Some(crate::ui::theme::TEXT_PRIMARY);
+
+                    let od_color = if self.looper_overdubbing {
+                        crate::ui::theme::METER_YELLOW
+                    } else {
+                        crate::ui::theme::TEXT_SECONDARY
+                    };
+                    ui.style_mut().visuals.override_text_color = Some(od_color);
+                    if ui.button("Overdub").clicked() {
+                        self.looper_overdubbing = if self.looper_overdubbing {
+                            false
+                        } else if self.looper_playing {
+                            true
+                        } else {
+                            false
+                        };
+                        if let Some(id) = self.looper_node_id {
+                            self.audio_engine.graph_set_state(
+                                id,
+                                NodeInternalState::Looper(LooperNodeState {
+                                    enabled: true,
+                                    recording: self.looper_recording,
+                                    playing: self.looper_playing,
+                                    overdubbing: self.looper_overdubbing,
+                                    cleared: false,
+                                }),
+                            );
+                        }
+                    }
+                    ui.style_mut().visuals.override_text_color =
+                        Some(crate::ui::theme::TEXT_PRIMARY);
+
+                    if ui.button("Clear").clicked() {
                         self.looper_recording = false;
                         self.looper_playing = false;
                         self.looper_overdubbing = false;
@@ -437,135 +612,38 @@ impl App for ToneDockApp {
                             );
                         }
                     }
-                }
 
-                let rec_color = if self.looper_recording {
-                    crate::ui::theme::METER_RED
-                } else {
-                    crate::ui::theme::TEXT_SECONDARY
-                };
-                ui.style_mut().visuals.override_text_color = Some(rec_color);
-                if ui.button("Rec").clicked() {
-                    if self.looper_node_id.is_none() {
-                        self.looper_node_id = Some(self.audio_engine.add_looper_node());
-                    }
-                    self.looper_enabled = true;
-                    self.looper_recording = !self.looper_recording;
-                    self.looper_playing = if self.looper_recording { false } else { true };
                     if let Some(id) = self.looper_node_id {
-                        self.audio_engine.graph_set_state(
-                            id,
-                            NodeInternalState::Looper(LooperNodeState {
-                                enabled: true,
-                                recording: self.looper_recording,
-                                playing: self.looper_playing,
-                                overdubbing: false,
-                                cleared: false,
-                            }),
-                        );
-                        self.audio_engine.graph_set_enabled(id, true);
-                        self.audio_engine.graph_commit_topology();
+                        let guard = self.audio_engine.graph.load();
+                        let loop_samples = guard.looper_loop_length(id);
+                        drop(guard);
+                        if loop_samples > 0 {
+                            let sr = self.audio_engine.sample_rate;
+                            let secs = loop_samples as f64 / sr;
+                            ui.label(
+                                RichText::new(format!("{:.1}s", secs))
+                                    .size(10.0)
+                                    .color(crate::ui::theme::TEXT_SECONDARY),
+                            );
+                        }
                     }
-                }
-                ui.style_mut().visuals.override_text_color = Some(crate::ui::theme::TEXT_PRIMARY);
-
-                let play_color = if self.looper_playing {
-                    crate::ui::theme::METER_GREEN
-                } else {
-                    crate::ui::theme::TEXT_SECONDARY
-                };
-                ui.style_mut().visuals.override_text_color = Some(play_color);
-                if ui.button("Play").clicked() {
-                    if self.looper_node_id.is_none() {
-                        self.looper_node_id = Some(self.audio_engine.add_looper_node());
-                    }
-                    self.looper_playing = !self.looper_playing;
-                    self.looper_recording = false;
-                    if let Some(id) = self.looper_node_id {
-                        self.audio_engine.graph_set_state(
-                            id,
-                            NodeInternalState::Looper(LooperNodeState {
-                                enabled: true,
-                                recording: false,
-                                playing: self.looper_playing,
-                                overdubbing: self.looper_overdubbing,
-                                cleared: false,
-                            }),
-                        );
-                        self.audio_engine.graph_set_enabled(id, true);
-                        self.audio_engine.graph_commit_topology();
-                    }
-                }
-                ui.style_mut().visuals.override_text_color = Some(crate::ui::theme::TEXT_PRIMARY);
-
-                let od_color = if self.looper_overdubbing {
-                    crate::ui::theme::METER_YELLOW
-                } else {
-                    crate::ui::theme::TEXT_SECONDARY
-                };
-                ui.style_mut().visuals.override_text_color = Some(od_color);
-                if ui.button("Overdub").clicked() {
-                    self.looper_overdubbing = if self.looper_overdubbing {
-                        false
-                    } else if self.looper_playing {
-                        true
-                    } else {
-                        false
-                    };
-                    if let Some(id) = self.looper_node_id {
-                        self.audio_engine.graph_set_state(
-                            id,
-                            NodeInternalState::Looper(LooperNodeState {
-                                enabled: true,
-                                recording: self.looper_recording,
-                                playing: self.looper_playing,
-                                overdubbing: self.looper_overdubbing,
-                                cleared: false,
-                            }),
-                        );
-                    }
-                }
-                ui.style_mut().visuals.override_text_color = Some(crate::ui::theme::TEXT_PRIMARY);
-
-                if ui.button("Clear").clicked() {
-                    self.looper_recording = false;
-                    self.looper_playing = false;
-                    self.looper_overdubbing = false;
-                    if let Some(id) = self.looper_node_id {
-                        self.audio_engine.graph_set_state(
-                            id,
-                            NodeInternalState::Looper(LooperNodeState {
-                                enabled: false,
-                                recording: false,
-                                playing: false,
-                                overdubbing: false,
-                                cleared: true,
-                            }),
-                        );
-                    }
-                }
-
-                if let Some(id) = self.looper_node_id {
-                    let guard = self.audio_engine.graph.load();
-                    let loop_samples = guard.looper_loop_length(id);
-                    drop(guard);
-                    if loop_samples > 0 {
-                        let sr = self.audio_engine.sample_rate;
-                        let secs = loop_samples as f64 / sr;
-                        ui.label(
-                            RichText::new(format!("{:.1}s", secs))
-                                .size(10.0)
-                                .color(crate::ui::theme::TEXT_SECONDARY),
-                        );
-                    }
-                }
+                });
             });
-        });
 
         CentralPanel::default().show(ctx, |ui| match self.view_mode {
             ViewMode::Rack => self.show_rack_view(ui),
             ViewMode::NodeEditor => self.show_node_editor(ui),
         });
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift) {
+            self.perform_undo();
+        }
+        if ctx.input(|i| {
+            (i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && i.modifiers.shift)
+                || (i.key_pressed(egui::Key::Y) && i.modifiers.ctrl)
+        }) {
+            self.perform_redo();
+        }
 
         if self.show_preferences {
             if let Some(ref mut state) = self.preferences_state {
@@ -724,6 +802,9 @@ impl ToneDockApp {
 
                     let commands = self.rack_view.show(ui, chain_slots, &available);
 
+                    let mut deferred_editor_cmds: Vec<crate::ui::rack_view::RackCommand> =
+                        Vec::new();
+
                     for cmd in commands {
                         match cmd {
                             crate::ui::rack_view::RackCommand::Add(plugin_idx) => {
@@ -768,6 +849,56 @@ impl ToneDockApp {
                                     slot.enabled = !slot.enabled;
                                 }
                             }
+                            crate::ui::rack_view::RackCommand::OpenEditor(_)
+                            | crate::ui::rack_view::RackCommand::CloseEditor(_) => {
+                                deferred_editor_cmds.push(cmd);
+                            }
+                        }
+                    }
+
+                    drop(chain);
+
+                    for cmd in deferred_editor_cmds {
+                        match cmd {
+                            crate::ui::rack_view::RackCommand::OpenEditor(idx) => {
+                                let chain = self.audio_engine.chain.lock();
+                                let ec = chain
+                                    .slots
+                                    .get(idx)
+                                    .and_then(|s| s.instance.as_ref())
+                                    .and_then(|p| p.edit_controller().cloned());
+                                let name = chain.slots.get(idx).map(|s| s.info.name.clone());
+                                drop(chain);
+
+                                if let (Some(ec), Some(name)) = (ec, name) {
+                                    let mut chain = self.audio_engine.chain.lock();
+                                    if let Some(slot) = chain.slots.get_mut(idx) {
+                                        match slot.editor.open_separate_window(
+                                            &ec,
+                                            &name,
+                                            self.main_hwnd.map(|h| h.as_ptr()),
+                                        ) {
+                                            Ok(()) => {
+                                                self.status_message =
+                                                    format!("Opened editor: {}", name);
+                                            }
+                                            Err(e) => {
+                                                self.status_message =
+                                                    format!("Editor error: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            crate::ui::rack_view::RackCommand::CloseEditor(idx) => {
+                                let mut chain = self.audio_engine.chain.lock();
+                                if let Some(slot) = chain.slots.get_mut(idx) {
+                                    let name = slot.info.name.clone();
+                                    slot.editor.close();
+                                    self.status_message = format!("Closed editor: {}", name);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -865,12 +996,20 @@ impl ToneDockApp {
     }
 
     fn process_editor_commands(&mut self, cmds: Vec<EdCmd>) {
+        let mut undo_actions: Vec<UndoAction> = Vec::new();
+        let mut is_continuous = false;
+
         for cmd in cmds {
             match cmd {
                 EdCmd::AddNode(node_type, pos) => {
-                    let id = self
-                        .audio_engine
-                        .add_node_with_position(node_type, pos.0, pos.1);
+                    let id =
+                        self.audio_engine
+                            .add_node_with_position(node_type.clone(), pos.0, pos.1);
+                    undo_actions.push(UndoAction::AddedNode {
+                        node_id: id,
+                        node_type,
+                        position: pos,
+                    });
                     self.status_message = format!("Added node {:?}", id);
                 }
                 EdCmd::AddVstNode {
@@ -882,9 +1021,14 @@ impl ToneDockApp {
                         plugin_path: plugin_path.to_string_lossy().into_owned(),
                         plugin_name: plugin_name.clone(),
                     };
-                    let id = self
-                        .audio_engine
-                        .add_node_with_position(node_type, pos.0, pos.1);
+                    let id =
+                        self.audio_engine
+                            .add_node_with_position(node_type.clone(), pos.0, pos.1);
+                    undo_actions.push(UndoAction::AddedNode {
+                        node_id: id,
+                        node_type,
+                        position: pos,
+                    });
                     match self.audio_engine.load_vst_plugin_to_node(
                         id,
                         &crate::vst_host::scanner::PluginInfo {
@@ -904,36 +1048,94 @@ impl ToneDockApp {
                     }
                 }
                 EdCmd::RemoveNode(id) => {
+                    {
+                        let guard = self.audio_engine.graph.load();
+                        if let Some(node) = guard.get_node(id) {
+                            let connections: Vec<Connection> = guard
+                                .connections()
+                                .iter()
+                                .filter(|c| c.source_node == id || c.target_node == id)
+                                .cloned()
+                                .collect();
+                            undo_actions.push(UndoAction::RemovedNode {
+                                node_id: id,
+                                node_type: node.node_type.clone(),
+                                position: node.position,
+                                enabled: node.enabled,
+                                bypassed: node.bypassed,
+                                state: node.internal_state.clone(),
+                                connections,
+                            });
+                        }
+                    }
                     self.audio_engine.graph_remove_node(id);
                     self.audio_engine.apply_commands_to_staging();
                     self.status_message = format!("Removed node {:?}", id);
                 }
                 EdCmd::Connect(conn) => {
+                    undo_actions.push(UndoAction::Connected(conn.clone()));
                     self.audio_engine.graph_connect(conn);
                     self.audio_engine.apply_commands_to_staging();
                     self.status_message = "Connected".into();
                 }
                 EdCmd::Disconnect(src_node, src_port, tgt_node, tgt_port) => {
+                    let conn = Connection {
+                        source_node: src_node,
+                        source_port: src_port,
+                        target_node: tgt_node,
+                        target_port: tgt_port,
+                    };
+                    undo_actions.push(UndoAction::Disconnected(conn));
                     self.audio_engine
                         .graph_disconnect((src_node, src_port), (tgt_node, tgt_port));
                     self.audio_engine.apply_commands_to_staging();
                     self.status_message = "Disconnected".into();
                 }
                 EdCmd::SetPos(id, x, y) => {
+                    let old_pos = {
+                        let guard = self.audio_engine.graph.load();
+                        guard.get_node(id).map(|n| n.position).unwrap_or((0.0, 0.0))
+                    };
+                    undo_actions.push(UndoAction::MovedNode {
+                        node_id: id,
+                        old_pos,
+                        new_pos: (x, y),
+                    });
                     self.audio_engine.send_command(
                         crate::audio::graph_command::GraphCommand::SetNodePosition(id, x, y),
                     );
                     self.audio_engine.apply_commands_to_staging();
                 }
                 EdCmd::SetState(id, state) => {
+                    let old_state = {
+                        let guard = self.audio_engine.graph.load();
+                        guard
+                            .get_node(id)
+                            .map(|n| n.internal_state.clone())
+                            .unwrap_or(NodeInternalState::None)
+                    };
+                    if std::mem::discriminant(&old_state) == std::mem::discriminant(&state) {
+                        is_continuous = true;
+                    }
+                    undo_actions.push(UndoAction::ChangedState {
+                        node_id: id,
+                        old_state,
+                        new_state: state.clone(),
+                    });
                     self.audio_engine.graph_set_state(id, state);
                     self.audio_engine.apply_commands_to_staging();
                 }
                 EdCmd::ToggleBypass(id) => {
-                    let guard = self.audio_engine.graph.load();
-                    let current = guard.get_node(id).map(|n| n.bypassed).unwrap_or(false);
-                    drop(guard);
-                    self.audio_engine.graph_set_bypassed(id, !current);
+                    let old_bypassed = {
+                        let guard = self.audio_engine.graph.load();
+                        guard.get_node(id).map(|n| n.bypassed).unwrap_or(false)
+                    };
+                    undo_actions.push(UndoAction::ChangedBypass {
+                        node_id: id,
+                        old_bypassed,
+                        new_bypassed: !old_bypassed,
+                    });
+                    self.audio_engine.graph_set_bypassed(id, !old_bypassed);
                     self.audio_engine.apply_commands_to_staging();
                 }
                 EdCmd::DuplicateNode(id) => {
@@ -944,13 +1146,18 @@ impl ToneDockApp {
                         let (ox, oy) = node.position;
                         drop(guard);
                         let new_id = self.audio_engine.add_node_with_position(
-                            node_type,
+                            node_type.clone(),
                             ox + 50.0,
                             oy + 50.0,
                         );
-                        self.audio_engine.graph_set_state(new_id, state);
+                        self.audio_engine.graph_set_state(new_id, state.clone());
                         self.audio_engine.graph_commit_topology();
                         self.audio_engine.apply_commands_to_staging();
+                        undo_actions.push(UndoAction::AddedNode {
+                            node_id: new_id,
+                            node_type,
+                            position: (ox + 50.0, oy + 50.0),
+                        });
                         self.node_editor.set_selection(Some(new_id));
                         self.status_message = format!("Duplicated node {:?}", new_id);
                     }
@@ -971,6 +1178,45 @@ impl ToneDockApp {
                     self.apply_template(&template_name, pos);
                 }
             }
+        }
+
+        if !undo_actions.is_empty() {
+            let label = if is_continuous {
+                "Change Parameter".into()
+            } else if undo_actions
+                .iter()
+                .any(|a| matches!(a, UndoAction::AddedNode { .. }))
+            {
+                "Add Node".into()
+            } else if undo_actions
+                .iter()
+                .any(|a| matches!(a, UndoAction::RemovedNode { .. }))
+            {
+                "Remove Node".into()
+            } else if undo_actions
+                .iter()
+                .any(|a| matches!(a, UndoAction::Connected(_)))
+            {
+                "Connect".into()
+            } else if undo_actions
+                .iter()
+                .any(|a| matches!(a, UndoAction::Disconnected(_)))
+            {
+                "Disconnect".into()
+            } else if undo_actions
+                .iter()
+                .any(|a| matches!(a, UndoAction::MovedNode { .. }))
+            {
+                "Move Node".into()
+            } else {
+                "Edit".into()
+            };
+
+            self.undo_manager.push(UndoStep {
+                label,
+                actions: undo_actions,
+                is_continuous,
+            });
         }
     }
 

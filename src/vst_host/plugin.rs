@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::path::PathBuf;
 
@@ -7,7 +8,7 @@ use vst3::Steinberg::Vst::{
     Sample32,
 };
 use vst3::Steinberg::{
-    IPluginBaseTrait, IPluginFactory, IPluginFactoryTrait, PClassInfo, TBool, kResultOk,
+    kResultOk, IPluginBaseTrait, IPluginFactory, IPluginFactoryTrait, PClassInfo, TBool,
 };
 use vst3::{ComPtr, Interface};
 
@@ -29,6 +30,7 @@ pub struct LoadedPlugin {
     info: PluginInfo,
     num_inputs: i32,
     num_outputs: i32,
+    has_editor_cached: Cell<Option<bool>>,
 }
 
 impl LoadedPlugin {
@@ -155,6 +157,7 @@ impl LoadedPlugin {
             info: info.clone(),
             num_inputs,
             num_outputs,
+            has_editor_cached: Cell::new(None),
         })
     }
 
@@ -246,6 +249,36 @@ impl LoadedPlugin {
         unsafe {
             self.audio_processor.process(&mut process_data);
         }
+    }
+
+    pub fn has_editor(&self) -> bool {
+        if let Some(cached) = self.has_editor_cached.get() {
+            return cached;
+        }
+        let result = if let Some(ref ec) = self.edit_controller {
+            unsafe {
+                let view_ptr = ec.createView(b"editor\0".as_ptr() as *const i8);
+                if !view_ptr.is_null() {
+                    if let Some(_view) = vst3::ComPtr::<vst3::Steinberg::IPlugView>::from_raw(
+                        view_ptr as *mut vst3::Steinberg::IPlugView,
+                    ) {
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        self.has_editor_cached.set(Some(result));
+        result
+    }
+
+    pub fn edit_controller(&self) -> Option<&ComPtr<IEditController>> {
+        self.edit_controller.as_ref()
     }
 
     pub fn parameter_info(&self) -> Vec<ParamInfo> {
