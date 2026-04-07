@@ -1,14 +1,14 @@
-use std::cell::Cell;
 use std::ffi::c_void;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use vst3::Steinberg::Vst::{
-    self, AudioBusBuffers, AudioBusBuffers__type0, IAudioProcessor, IAudioProcessorTrait,
-    IComponent, IComponentTrait, IEditController, IEditControllerTrait, ProcessData, ProcessSetup,
-    Sample32,
+    self, AudioBusBuffers, AudioBusBuffers__type0, IAudioProcessor, IComponent, IComponentHandler,
+    IComponentTrait, IEditController, IEditControllerTrait, IHostApplication, ProcessSetup,
 };
 use vst3::Steinberg::{
-    kResultOk, IPluginBaseTrait, IPluginFactory, IPluginFactoryTrait, PClassInfo, TBool,
+    kResultOk, tresult, uint32, FUnknown, IPluginBaseTrait, IPluginFactory, IPluginFactoryTrait,
+    PClassInfo, TBool, TUID,
 };
 use vst3::{ComPtr, Interface};
 
@@ -21,365 +21,321 @@ const MEDIA_TYPE_AUDIO: i32 = 0;
 const BUS_DIR_INPUT: i32 = 0;
 const BUS_DIR_OUTPUT: i32 = 1;
 
+#[repr(C)]
+struct HostComponentHandlerVtbl {
+    query_interface: unsafe extern "system" fn(*mut c_void, *const TUID, *mut *mut c_void) -> tresult,
+    add_ref: unsafe extern "system" fn(*mut c_void) -> uint32,
+    release: unsafe extern "system" fn(*mut c_void) -> uint32,
+    begin_edit: unsafe extern "system" fn(*mut c_void, u32) -> tresult,
+    perform_edit: unsafe extern "system" fn(*mut c_void, u32, f64) -> tresult,
+    end_edit: unsafe extern "system" fn(*mut c_void, u32) -> tresult,
+    restart_component: unsafe extern "system" fn(*mut c_void, i32) -> tresult,
+}
+
+#[repr(C)]
+struct HostComponentHandler { vtbl: *const HostComponentHandlerVtbl, ref_count: AtomicUsize }
+static HOST_COMPONENT_HANDLER_VTBL: HostComponentHandlerVtbl = HostComponentHandlerVtbl {
+    query_interface: handler_qi, add_ref: handler_add_ref, release: handler_release,
+    begin_edit: handler_noop2, perform_edit: handler_noop3, end_edit: handler_noop2, restart_component: handler_noop2i,
+};
+unsafe extern "system" fn handler_noop2(_: *mut c_void, _: u32) -> tresult { kResultOk }
+unsafe extern "system" fn handler_noop3(_: *mut c_void, _: u32, _: f64) -> tresult { kResultOk }
+unsafe extern "system" fn handler_noop2i(_: *mut c_void, _: i32) -> tresult { kResultOk }
+unsafe extern "system" fn handler_qi(this: *mut c_void, iid: *const TUID, obj: *mut *mut c_void) -> tresult {
+    let requested = unsafe { &*(iid as *const [u8; 16]) };
+    if *requested == <FUnknown as Interface>::IID || *requested == <IComponentHandler as Interface>::IID {
+        unsafe { handler_add_ref(this); obj.write(this); }
+        return kResultOk;
+    }
+    -1
+}
+unsafe extern "system" fn handler_add_ref(this: *mut c_void) -> uint32 {
+    let obj = this as *const HostComponentHandler;
+    unsafe { (*obj).ref_count.fetch_add(1, Ordering::Relaxed) as u32 + 1 }
+}
+unsafe extern "system" fn handler_release(this: *mut c_void) -> uint32 {
+    let obj = this as *const HostComponentHandler;
+    let count = unsafe { (*obj).ref_count.fetch_sub(1, Ordering::Relaxed) };
+    if count == 1 { let _ = unsafe { Box::from_raw(this as *mut HostComponentHandler) }; }
+    count.saturating_sub(1) as u32
+}
+
+#[repr(C)]
+struct HostApplicationVtbl {
+    query_interface: unsafe extern "system" fn(*mut c_void, *const TUID, *mut *mut c_void) -> tresult,
+    add_ref: unsafe extern "system" fn(*mut c_void) -> uint32,
+    release: unsafe extern "system" fn(*mut c_void) -> uint32,
+    get_name: unsafe extern "system" fn(*mut c_void, *mut u16) -> tresult,
+    create_instance: unsafe extern "system" fn(*mut c_void, *const TUID, *const TUID, *mut *mut c_void) -> tresult,
+}
+#[repr(C)]
+struct HostApplication { vtbl: *const HostApplicationVtbl, ref_count: AtomicUsize }
+static HOST_APPLICATION_VTBL: HostApplicationVtbl = HostApplicationVtbl {
+    query_interface: host_app_qi, add_ref: host_app_add_ref, release: host_app_release,
+    get_name: host_app_get_name, create_instance: host_app_create_instance,
+};
+unsafe extern "system" fn host_app_qi(this: *mut c_void, iid: *const TUID, obj: *mut *mut c_void) -> tresult {
+    let requested = unsafe { &*(iid as *const [u8; 16]) };
+    if *requested == <FUnknown as Interface>::IID || *requested == <IHostApplication as Interface>::IID {
+        unsafe { host_app_add_ref(this); obj.write(this); }
+        return kResultOk;
+    }
+    -1
+}
+unsafe extern "system" fn host_app_add_ref(this: *mut c_void) -> uint32 {
+    let obj = this as *const HostApplication;
+    unsafe { (*obj).ref_count.fetch_add(1, Ordering::Relaxed) as u32 + 1 }
+}
+unsafe extern "system" fn host_app_release(this: *mut c_void) -> uint32 {
+    let obj = this as *const HostApplication;
+    let count = unsafe { (*obj).ref_count.fetch_sub(1, Ordering::Relaxed) };
+    if count == 1 { let _ = unsafe { Box::from_raw(this as *mut HostApplication) }; }
+    count.saturating_sub(1) as u32
+}
+unsafe extern "system" fn host_app_get_name(_: *mut c_void, name: *mut u16) -> tresult {
+    let app_name = "ToneDock\0";
+    let wide: Vec<u16> = app_name.encode_utf16().collect();
+    unsafe { std::ptr::copy_nonoverlapping(wide.as_ptr(), name, wide.len()); }
+    kResultOk
+}
+unsafe extern "system" fn host_app_create_instance(_: *mut c_void, _: *const TUID, _: *const TUID, obj: *mut *mut c_void) -> tresult {
+    unsafe { obj.write(std::ptr::null_mut()) };
+    -1
+}
+
 pub struct LoadedPlugin {
     _library: libloading::Library,
     component: ComPtr<IComponent>,
     edit_controller: Option<ComPtr<IEditController>>,
     audio_processor: ComPtr<IAudioProcessor>,
-    #[allow(dead_code)]
-    info: PluginInfo,
-    num_inputs: i32,
-    num_outputs: i32,
-    has_editor_cached: Cell<Option<bool>>,
+    pub info: PluginInfo,
+    pub num_inputs: i32,
+    pub num_outputs: i32,
+    host_application: *mut c_void,
+    component_handler: *mut c_void,
+    sample_rate: f64,
+    block_size: i32,
 }
+
+unsafe impl Send for LoadedPlugin {}
+
+unsafe extern "C" {
+    #[link_name = "seh_call_query_interface"]
+    fn seh_call_query_interface(com_obj: *mut c_void, iid: *const c_void, obj: *mut *mut c_void) -> i32;
+    #[link_name = "seh_call_count_classes"]
+    fn seh_call_count_classes(com_obj: *mut c_void) -> i32;
+    #[link_name = "seh_call_get_class_info"]
+    fn seh_call_get_class_info(com_obj: *mut c_void, idx: i32, info: *mut c_void) -> i32;
+    #[link_name = "seh_call_create_instance"]
+    fn seh_call_create_instance(com_obj: *mut c_void, cid: *const c_void, iid: *const c_void, obj: *mut *mut c_void) -> i32;
+    #[link_name = "seh_call_initialize"]
+    fn seh_call_initialize(com_obj: *mut c_void, context: *mut c_void) -> i32;
+    #[link_name = "seh_call_terminate"]
+    fn seh_call_terminate(com_obj: *mut c_void) -> i32;
+    #[link_name = "seh_call_get_bus_count"]
+    fn seh_call_get_bus_count(com_obj: *mut c_void, media_type: i32, dir: i32) -> i32;
+    #[link_name = "seh_call_activate_bus"]
+    fn seh_call_activate_bus(com_obj: *mut c_void, media_type: i32, dir: i32, idx: i32, state: u8) -> i32;
+    #[link_name = "seh_call_set_active"]
+    fn seh_call_set_active(com_obj: *mut c_void, state: u8) -> i32;
+    #[link_name = "seh_call_set_bus_arrangements"]
+    fn seh_call_set_bus_arrangements(com_obj: *mut c_void, inputs: *mut c_void, num_ins: i32, outputs: *mut c_void, num_outs: i32) -> i32;
+    #[link_name = "seh_call_setup_processing"]
+    fn seh_call_setup_processing(com_obj: *mut c_void, setup: *mut c_void) -> i32;
+    #[link_name = "seh_call_set_processing"]
+    fn seh_call_set_processing(com_obj: *mut c_void, state: u8) -> i32;
+    #[link_name = "seh_call_process_robust"]
+    fn seh_call_process_robust(com_obj: *mut c_void, samples: i32, n_ins: i32, ins: *mut c_void, n_outs: i32, outs: *mut c_void, ctx: *mut c_void) -> i32;
+    #[link_name = "seh_call_set_component_handler"]
+    fn seh_call_set_component_handler(com_obj: *mut c_void, handler: *mut c_void) -> i32;
+    #[link_name = "seh_call_get_parameter_count"]
+    fn seh_call_get_parameter_count(com_obj: *mut c_void) -> i32;
+    #[link_name = "seh_call_get_parameter_info"]
+    fn seh_call_get_parameter_info(com_obj: *mut c_void, idx: i32, info: *mut c_void) -> i32;
+    #[link_name = "seh_call_get_param_normalized"]
+    fn seh_call_get_param_normalized(com_obj: *mut c_void, id: u32) -> f64;
+    #[link_name = "seh_call_set_param_normalized"]
+    fn seh_call_set_param_normalized(com_obj: *mut c_void, id: u32, val: f64) -> i32;
+    #[link_name = "seh_call_set_io_mode"]
+    fn seh_call_set_io_mode(com_obj: *mut c_void, mode: i32) -> i32;
+}
+
+const SEH_CAUGHT: i32 = -2;
 
 impl LoadedPlugin {
     pub fn load(info: &PluginInfo) -> anyhow::Result<Self> {
-        log::info!(
-            "LoadedPlugin::load start: {:?} (is_dir={})",
-            info.path,
-            info.path.is_dir()
-        );
         let dll_path = Self::find_dll(&info.path)?;
-        log::info!("Found DLL: {:?}", dll_path);
-        let library = unsafe {
-            libloading::Library::new(&dll_path)
-                .map_err(|e| anyhow::anyhow!("Failed to load library: {}", e))?
-        };
-        log::info!("Library loaded successfully");
-
-        let get_factory: libloading::Symbol<unsafe extern "system" fn() -> *mut c_void> = unsafe {
-            library
-                .get(b"GetPluginFactory")
-                .map_err(|e| anyhow::anyhow!("GetPluginFactory not found: {}", e))?
-        };
-
+        let library = unsafe { libloading::Library::new(&dll_path)? };
+        let get_factory: libloading::Symbol<unsafe extern "system" fn() -> *mut c_void> = unsafe { library.get(b"GetPluginFactory")? };
         let factory_ptr = unsafe { get_factory() };
-        if factory_ptr.is_null() {
-            return Err(anyhow::anyhow!("Factory returned null"));
-        }
-        log::info!("GetPluginFactory returned non-null");
+        if factory_ptr.is_null() { return Err(anyhow::anyhow!("Factory null")); }
 
-        let factory: ComPtr<IPluginFactory> = unsafe {
-            ComPtr::from_raw(factory_ptr as *mut IPluginFactory)
-                .ok_or_else(|| anyhow::anyhow!("Failed to create ComPtr for factory"))?
-        };
-
-        let class_count = unsafe { factory.countClasses() };
-        log::info!("Factory class count: {}", class_count);
-        if class_count <= 0 {
-            return Err(anyhow::anyhow!("No classes found in plugin"));
-        }
+        let class_count = unsafe { seh_call_count_classes(factory_ptr) };
+        if class_count <= 0 { return Err(anyhow::anyhow!("No classes")); }
 
         let mut target_cid = None;
         for i in 0..class_count {
             let mut class_info: PClassInfo = unsafe { std::mem::zeroed() };
-            let result = unsafe { factory.getClassInfo(i, &mut class_info) };
-            if result == kResultOk {
-                let cat =
-                    unsafe { std::ffi::CStr::from_ptr(class_info.category.as_ptr() as *const i8) };
-                log::info!("Class {}: category={:?}", i, cat.to_bytes());
-                if cat.to_bytes() == b"Audio Module Class" {
-                    target_cid = Some(class_info.cid);
-                    break;
-                }
+            if unsafe { seh_call_get_class_info(factory_ptr, i, &mut class_info as *mut _ as *mut _) } == kResultOk {
+                let cat = String::from_utf8_lossy(unsafe { std::mem::transmute::<&[i8], &[u8]>(&class_info.category) });
+                if cat.contains("Audio") || cat.contains("Module") { target_cid = Some(class_info.cid); break; }
             }
         }
+        let cid = target_cid.ok_or_else(|| anyhow::anyhow!("No CID"))?;
 
-        let cid = target_cid.ok_or_else(|| anyhow::anyhow!("No audio processor class found"))?;
-        log::info!("Found audio processor class");
-
-        let iid_component = <IComponent as Interface>::IID;
         let mut obj_ptr: *mut c_void = std::ptr::null_mut();
-        let result = unsafe {
-            factory.createInstance(
-                cid.as_ptr() as *const _,
-                iid_component.as_ptr() as *const _,
-                &mut obj_ptr,
-            )
-        };
+        unsafe { seh_call_create_instance(factory_ptr, cid.as_ptr() as *const _, <IComponent as Interface>::IID.as_ptr() as *const _, &mut obj_ptr); }
+        if obj_ptr.is_null() { return Err(anyhow::anyhow!("Instance null")); }
 
-        if result != kResultOk || obj_ptr.is_null() {
-            return Err(anyhow::anyhow!("createInstance failed"));
-        }
-        log::info!("createInstance succeeded");
+        let component = unsafe { ComPtr::from_raw(obj_ptr as *mut IComponent).unwrap() };
+        let host_application = Box::into_raw(Box::new(HostApplication { vtbl: &HOST_APPLICATION_VTBL, ref_count: AtomicUsize::new(1) })) as *mut c_void;
+        unsafe { seh_call_initialize(obj_ptr, host_application); }
 
-        let component: ComPtr<IComponent> = unsafe {
-            ComPtr::from_raw(obj_ptr as *mut IComponent)
-                .ok_or_else(|| anyhow::anyhow!("Failed to wrap component"))?
-        };
+        let num_inputs = unsafe { seh_call_get_bus_count(obj_ptr, MEDIA_TYPE_AUDIO, BUS_DIR_INPUT) }.max(1);
+        let num_outputs = unsafe { seh_call_get_bus_count(obj_ptr, MEDIA_TYPE_AUDIO, BUS_DIR_OUTPUT) }.max(1);
 
-        unsafe {
-            let result = component.initialize(std::ptr::null_mut());
-            log::info!("initialize() returned: {}", result);
-            if result != kResultOk {
-                return Err(anyhow::anyhow!("initialize() failed: {}", result));
-            }
-        }
+        let mut proc_ptr: *mut c_void = std::ptr::null_mut();
+        unsafe { seh_call_query_interface(obj_ptr, <IAudioProcessor as Interface>::IID.as_ptr() as *const _, &mut proc_ptr); }
+        let audio_processor = unsafe { ComPtr::from_raw(proc_ptr as *mut IAudioProcessor).unwrap() };
 
-        let num_inputs = unsafe { component.getBusCount(MEDIA_TYPE_AUDIO, BUS_DIR_INPUT) };
-        let num_outputs = unsafe { component.getBusCount(MEDIA_TYPE_AUDIO, BUS_DIR_OUTPUT) };
-        log::info!("Bus counts: inputs={}, outputs={}", num_inputs, num_outputs);
+        let mut edit_ptr: *mut c_void = std::ptr::null_mut();
+        unsafe { seh_call_query_interface(obj_ptr, <IEditController as Interface>::IID.as_ptr() as *const _, &mut edit_ptr); }
+        let edit_controller = if !edit_ptr.is_null() { unsafe { ComPtr::from_raw(edit_ptr as *mut IEditController) } } else { None };
 
-        for i in 0..num_inputs.max(0) {
-            unsafe {
-                component.activateBus(MEDIA_TYPE_AUDIO, BUS_DIR_INPUT, i, 1 as TBool);
-            }
-        }
-        for i in 0..num_outputs.max(0) {
-            unsafe {
-                component.activateBus(MEDIA_TYPE_AUDIO, BUS_DIR_OUTPUT, i, 1 as TBool);
-            }
-        }
-        log::info!("Buses activated");
+        let component_handler = if let Some(ref ec) = edit_controller {
+            let handler = Box::into_raw(Box::new(HostComponentHandler { vtbl: &HOST_COMPONENT_HANDLER_VTBL, ref_count: AtomicUsize::new(1) })) as *mut c_void;
+            unsafe { seh_call_set_component_handler(ec.as_ptr() as *mut _, handler); }
+            handler
+        } else { std::ptr::null_mut() };
 
-        let audio_processor: ComPtr<IAudioProcessor> = component
-            .cast::<IAudioProcessor>()
-            .ok_or_else(|| anyhow::anyhow!("IAudioProcessor not supported"))?;
-        log::info!("IAudioProcessor interface obtained");
-
-        let edit_controller: Option<ComPtr<IEditController>> = component.cast::<IEditController>();
-        log::info!(
-            "IEditController: {}",
-            if edit_controller.is_some() {
-                "available"
-            } else {
-                "not available"
-            }
-        );
-
-        log::info!("LoadedPlugin::load completed successfully");
-        Ok(Self {
-            _library: library,
-            component,
-            edit_controller,
-            audio_processor,
-            info: info.clone(),
-            num_inputs,
-            num_outputs,
-            has_editor_cached: Cell::new(None),
-        })
+        Ok(Self { _library: library, component, edit_controller, audio_processor, info: info.clone(), num_inputs, num_outputs, host_application, component_handler, sample_rate: 44100.0, block_size: 256 })
     }
 
     pub fn setup_processing(&mut self, sample_rate: f64, block_size: i32) -> anyhow::Result<()> {
-        log::info!(
-            "setup_processing start: sr={}, bs={}",
-            sample_rate,
-            block_size
-        );
-        let mut setup = ProcessSetup {
-            processMode: PROCESS_MODE_REALTIME,
-            symbolicSampleSize: SYMBOLIC_SAMPLE_SIZE_32,
-            maxSamplesPerBlock: block_size,
-            sampleRate: sample_rate,
-        };
-
-        let result = unsafe { self.audio_processor.setupProcessing(&mut setup) };
-        log::info!("setupProcessing returned: {}", result);
-        if result != kResultOk {
-            return Err(anyhow::anyhow!("setupProcessing failed: {}", result));
-        }
-
-        let in_arr = if self.num_inputs >= 2 {
-            [Vst::SpeakerArr::kStereo as u64]
-        } else {
-            [Vst::SpeakerArr::kMono as u64]
-        };
-        let out_arr = [Vst::SpeakerArr::kStereo as u64; 2];
-
+        self.sample_rate = sample_rate; self.block_size = block_size;
+        let in_arr = vec![Vst::SpeakerArr::kMono as u64; self.num_inputs as usize];
+        let out_arr = vec![Vst::SpeakerArr::kStereo as u64; self.num_outputs as usize];
         unsafe {
-            self.audio_processor.setBusArrangements(
-                in_arr.as_ptr() as *mut _,
-                self.num_inputs,
-                out_arr.as_ptr() as *mut _,
-                self.num_outputs,
-            );
-        }
-        log::info!("setBusArrangements called");
+            let p = self.audio_processor.as_ptr() as *mut c_void;
+            let c = self.component.as_ptr() as *mut c_void;
+            
+            // 1. setIoMode (Realtime)
+            // IComponent::setIoMode index is 6
+            let _ = seh_call_set_io_mode(c, 0); // 0 = kRealtime
 
-        unsafe {
-            self.component.setActive(1 as TBool);
+            // 2. setBusArrangements
+            seh_call_set_bus_arrangements(p, in_arr.as_ptr() as *mut _, self.num_inputs, out_arr.as_ptr() as *mut _, self.num_outputs);
+            
+            // 3. activateBus
+            for i in 0..self.num_inputs { seh_call_activate_bus(c, MEDIA_TYPE_AUDIO, BUS_DIR_INPUT, i, 1); }
+            for i in 0..self.num_outputs { seh_call_activate_bus(c, MEDIA_TYPE_AUDIO, BUS_DIR_OUTPUT, i, 1); }
+            
+            // 4. setupProcessing
+            let mut setup = ProcessSetup { processMode: PROCESS_MODE_REALTIME, symbolicSampleSize: SYMBOLIC_SAMPLE_SIZE_32, maxSamplesPerBlock: block_size, sampleRate: sample_rate };
+            seh_call_setup_processing(p, &mut setup as *mut _ as *mut _);
+            
+            // 5. setActive & setProcessing
+            seh_call_set_active(c, 1);
+            seh_call_set_processing(p, 1);
         }
-        log::info!("setActive(true) called");
-        unsafe {
-            self.audio_processor.setProcessing(1 as TBool);
-        }
-        log::info!("setProcessing(true) called, setup_processing complete");
-
         Ok(())
     }
 
     pub fn process_in_place(&mut self, buffer: &mut [&mut [f32]], num_frames: i32) {
-        let num_ch = buffer.len().min(self.num_outputs.max(0) as usize);
-        if num_ch == 0 {
-            return;
-        }
-
-        let mut channel_ptrs: Vec<*mut Sample32> = Vec::with_capacity(num_ch);
-        for ch in &mut buffer[..num_ch] {
-            channel_ptrs.push(ch.as_mut_ptr() as *mut Sample32);
-        }
-
-        let io_buf = AudioBusBuffers {
-            numChannels: num_ch as i32,
-            silenceFlags: 0,
-            __field0: AudioBusBuffers__type0 {
-                channelBuffers32: channel_ptrs.as_mut_ptr(),
-            },
-        };
-
-        let mut input_buffers = io_buf;
-        let mut output_buffers = io_buf;
-
-        let mut process_data = ProcessData {
-            processMode: PROCESS_MODE_REALTIME,
-            symbolicSampleSize: SYMBOLIC_SAMPLE_SIZE_32,
-            numSamples: num_frames,
-            numInputs: 1,
-            numOutputs: 1,
-            inputs: &mut input_buffers,
-            outputs: &mut output_buffers,
-            inputParameterChanges: std::ptr::null_mut(),
-            outputParameterChanges: std::ptr::null_mut(),
-            inputEvents: std::ptr::null_mut(),
-            outputEvents: std::ptr::null_mut(),
-            processContext: std::ptr::null_mut(),
-        };
-
-        unsafe {
-            self.audio_processor.process(&mut process_data);
-        }
-    }
-
-    pub fn has_editor(&self) -> bool {
-        if let Some(cached) = self.has_editor_cached.get() {
-            return cached;
-        }
-        let result = if let Some(ref ec) = self.edit_controller {
-            unsafe {
-                let view_ptr = ec.createView(b"editor\0".as_ptr() as *const i8);
-                if !view_ptr.is_null() {
-                    if let Some(_view) = vst3::ComPtr::<vst3::Steinberg::IPlugView>::from_raw(
-                        view_ptr as *mut vst3::Steinberg::IPlugView,
-                    ) {
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
+        if buffer.is_empty() || num_frames == 0 { return; }
+        let mut in_ptrs: Vec<*mut f32> = vec![buffer[0].as_mut_ptr()];
+        let mut out_ptrs: Vec<*mut f32> = buffer.iter_mut().take(2).map(|ch| ch.as_mut_ptr()).collect();
+        let in_bus = AudioBusBuffers { numChannels: in_ptrs.len() as i32, silenceFlags: 0, __field0: AudioBusBuffers__type0 { channelBuffers32: in_ptrs.as_mut_ptr() } };
+        let out_bus = AudioBusBuffers { numChannels: out_ptrs.len() as i32, silenceFlags: 0, __field0: AudioBusBuffers__type0 { channelBuffers32: out_ptrs.as_mut_ptr() } };
+        let mut in_buses = [in_bus]; let mut out_buses = [out_bus];
+        
+        let mut ctx: vst3::Steinberg::Vst::ProcessContext = unsafe { std::mem::zeroed() };
+        ctx.sampleRate = self.sample_rate;
+        ctx.tempo = 120.0;
+        ctx.timeSigNumerator = 4;
+        ctx.timeSigDenominator = 4;
+        ctx.state = (1 << 3) | (1 << 10); // kTempoValid | kSampleRateValid
+        
+        unsafe { 
+            let res = seh_call_process_robust(self.audio_processor.as_ptr() as *mut _, num_frames, 1, in_buses.as_mut_ptr() as *mut _, 1, out_buses.as_mut_ptr() as *mut _, &mut ctx as *mut _ as *mut _); 
+            if res == SEH_CAUGHT {
+                static mut LOGGED: bool = false;
+                if !LOGGED {
+                    log::error!("VST3 plugin crashed during process() - caught by SEH");
+                    LOGGED = true;
                 }
             }
-        } else {
-            false
-        };
-        self.has_editor_cached.set(Some(result));
-        result
+        }
     }
 
-    pub fn edit_controller(&self) -> Option<&ComPtr<IEditController>> {
-        self.edit_controller.as_ref()
-    }
-
+    pub fn has_editor(&self) -> bool { self.edit_controller.is_some() }
+    pub fn edit_controller(&self) -> Option<&ComPtr<IEditController>> { self.edit_controller.as_ref() }
     pub fn parameter_info(&self) -> Vec<ParamInfo> {
+        let mut params = Vec::new();
         if let Some(ref ec) = self.edit_controller {
-            let count = unsafe { ec.getParameterCount() };
-            let mut params = Vec::new();
+            let count = unsafe { seh_call_get_parameter_count(ec.as_ptr() as *mut _) };
             for i in 0..count {
-                let mut param_info: Vst::ParameterInfo = unsafe { std::mem::zeroed() };
-                unsafe {
-                    ec.getParameterInfo(i, &mut param_info);
+                let mut info: Vst::ParameterInfo = unsafe { std::mem::zeroed() };
+                if unsafe { seh_call_get_parameter_info(ec.as_ptr() as *mut _, i, &mut info as *mut _ as *mut _) } == kResultOk {
+                    let len = info.title.iter().position(|&c| c == 0).unwrap_or(128);
+                    params.push(ParamInfo { id: info.id, name: String::from_utf16_lossy(&info.title[..len]) });
                 }
-                let name = {
-                    let slice = &param_info.title;
-                    let len = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
-                    String::from_utf16_lossy(&slice[..len])
-                };
-                params.push(ParamInfo {
-                    id: param_info.id,
-                    name,
-                });
             }
-            params
-        } else {
-            Vec::new()
         }
+        params
     }
-
     pub fn get_parameter(&self, index: usize) -> f32 {
         if let Some(ref ec) = self.edit_controller {
-            let params = self.parameter_info();
-            if let Some(p) = params.get(index) {
-                unsafe { ec.getParamNormalized(p.id) as f32 }
-            } else {
-                0.0
-            }
-        } else {
-            0.0
+            let info = self.parameter_info();
+            if let Some(p) = info.get(index) { return unsafe { seh_call_get_param_normalized(ec.as_ptr() as *mut _, p.id) } as f32; }
         }
+        0.0
     }
-
     pub fn set_parameter(&mut self, index: usize, value: f32) {
         if let Some(ref ec) = self.edit_controller {
-            let params = self.parameter_info();
-            if let Some(p) = params.get(index) {
-                unsafe {
-                    ec.setParamNormalized(p.id, value as f64);
-                }
-            }
+            let info = self.parameter_info();
+            if let Some(p) = info.get(index) { unsafe { seh_call_set_param_normalized(ec.as_ptr() as *mut _, p.id, value as f64); } }
         }
     }
-
-    #[cfg(target_os = "windows")]
-    fn find_dll(bundle_path: &std::path::Path) -> anyhow::Result<PathBuf> {
-        if bundle_path.is_file() {
-            return Ok(bundle_path.to_path_buf());
-        }
-        let contents_dir = bundle_path.join("Contents");
-        if contents_dir.is_dir() {
-            if let Some(dll) = Self::find_dll_recursive(&contents_dir, 3) {
-                return Ok(dll);
+    fn find_dll(path: &std::path::Path) -> anyhow::Result<PathBuf> {
+        if path.is_file() { return Ok(path.to_path_buf()); }
+        let contents = path.join("Contents").join("x86_64-win");
+        if contents.is_dir() {
+            for entry in std::fs::read_dir(contents)? {
+                let p = entry?.path();
+                if p.extension().map_or(false, |e| e == "vst3" || e == "dll") { return Ok(p); }
             }
         }
-        Err(anyhow::anyhow!("No DLL found in VST3 bundle"))
-    }
-
-    #[cfg(target_os = "windows")]
-    fn find_dll_recursive(dir: &std::path::Path, depth: usize) -> Option<PathBuf> {
-        if depth == 0 {
-            return None;
-        }
-        for entry in std::fs::read_dir(dir).ok()? {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.is_file() {
-                let is_binary = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("dll") || e.eq_ignore_ascii_case("vst3"))
-                    .unwrap_or(false);
-                if is_binary {
-                    return Some(path);
-                }
-            } else if let Some(dll) = Self::find_dll_recursive(&path, depth - 1) {
-                return Some(dll);
-            }
-        }
-        None
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn find_dll(bundle_path: &std::path::Path) -> anyhow::Result<PathBuf> {
-        Ok(bundle_path.to_path_buf())
+        Err(anyhow::anyhow!("No DLL"))
     }
 }
 
 impl Drop for LoadedPlugin {
     fn drop(&mut self) {
         unsafe {
-            let _ = self.audio_processor.setProcessing(0 as TBool);
-            let _ = self.component.setActive(0 as TBool);
-            let _ = self.component.terminate();
+            let p = self.audio_processor.as_ptr() as *mut c_void;
+            let c = self.component.as_ptr() as *mut c_void;
+            let _ = seh_call_set_processing(p, 0);
+            let _ = seh_call_set_active(c, 0);
+            let _ = seh_call_terminate(c);
+        }
+        if !self.component_handler.is_null() { unsafe { handler_release(self.component_handler); } }
+        if !self.host_application.is_null() { unsafe { host_app_release(self.host_application); } }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_load_and_process_vst() {
+        let path = std::env::var("TEST_VST_PATH").ok().map(PathBuf::from);
+        if let Some(p) = path {
+            let mut plugin = LoadedPlugin::load(&PluginInfo { path: p, name: "Test".into(), vendor: "".into(), category: "".into() }).unwrap();
+            plugin.setup_processing(48000.0, 256).unwrap();
+            let mut l = vec![0.0f32; 256]; let mut r = vec![0.0f32; 256];
+            let mut buffer = vec![l.as_mut_slice(), r.as_mut_slice()];
+            for _ in 0..10 { plugin.process_in_place(&mut buffer, 256); }
         }
     }
 }

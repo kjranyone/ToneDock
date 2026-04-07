@@ -2,19 +2,20 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use vst3::ComPtr;
-use vst3::Steinberg::Vst::{IEditController, IEditControllerTrait};
+use vst3::Steinberg::Vst::IEditController;
 use vst3::Steinberg::{kResultOk, tresult, uint32, TUID};
-use vst3::Steinberg::{IPlugFrame, IPlugView, IPlugViewTrait, ViewRect};
+use vst3::Steinberg::{FUnknown_iid, IPlugFrame_iid};
+use vst3::Steinberg::{IPlugFrame, IPlugView, ViewRect};
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::Gdi::UpdateWindow,
     UI::WindowsAndMessaging::{
-        AdjustWindowRect, CreateWindowExW, DefWindowProcW, DestroyWindow, LoadCursorW,
-        RegisterClassW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW,
-        SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_CONTROLPARENT,
-        WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        AdjustWindowRect, CreateWindowExW, DefWindowProcW, DestroyWindow,
+        LoadCursorW, RegisterClassW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
+        CW_USEDEFAULT, IDC_ARROW, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WNDCLASSW, WS_CLIPCHILDREN,
+        WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW,
     },
 };
 
@@ -64,8 +65,7 @@ fn ensure_window_class_registered() {
 
 #[repr(C)]
 struct IPlugFrameComVtbl {
-    query_interface:
-        unsafe extern "system" fn(*mut c_void, *const TUID, *mut *mut c_void) -> tresult,
+    query_interface: unsafe extern "system" fn(*mut c_void, *const TUID, *mut *mut c_void) -> tresult,
     add_ref: unsafe extern "system" fn(*mut c_void) -> uint32,
     release: unsafe extern "system" fn(*mut c_void) -> uint32,
     resize_view: unsafe extern "system" fn(*mut c_void, *mut IPlugView, *mut ViewRect) -> tresult,
@@ -89,11 +89,13 @@ static HOST_FRAME_VTBL: IPlugFrameComVtbl = IPlugFrameComVtbl {
     resize_view: host_frame_resize_view,
 };
 
-unsafe extern "system" fn host_frame_qi(
-    _this: *mut c_void,
-    _iid: *const TUID,
-    obj: *mut *mut c_void,
-) -> tresult {
+unsafe extern "system" fn host_frame_qi(this: *mut c_void, iid: *const TUID, obj: *mut *mut c_void) -> tresult {
+    if iid.is_null() || obj.is_null() { return -1; }
+    let iid_val = unsafe { &*iid };
+    if *iid_val == FUnknown_iid || *iid_val == IPlugFrame_iid {
+        unsafe { host_frame_add_ref(this); obj.write(this); }
+        return kResultOk;
+    }
     unsafe { obj.write(std::ptr::null_mut()) };
     -1
 }
@@ -109,18 +111,12 @@ unsafe extern "system" fn host_frame_release(this: *mut c_void) -> uint32 {
     unsafe {
         let frame = this as *mut HostPlugFrame;
         let count = (*frame).ref_count.fetch_sub(1, Ordering::Relaxed);
-        if count == 1 {
-            let _ = Box::from_raw(this as *mut HostPlugFrame);
-        }
+        if count == 1 { let _ = Box::from_raw(this as *mut HostPlugFrame); }
         (count.saturating_sub(1)) as u32
     }
 }
 
-unsafe extern "system" fn host_frame_resize_view(
-    this: *mut c_void,
-    _view: *mut IPlugView,
-    new_size: *mut ViewRect,
-) -> tresult {
+unsafe extern "system" fn host_frame_resize_view(this: *mut c_void, _view: *mut IPlugView, new_size: *mut ViewRect) -> tresult {
     #[cfg(target_os = "windows")]
     {
         let frame = this as *const HostPlugFrame;
@@ -129,56 +125,132 @@ unsafe extern "system" fn host_frame_resize_view(
             let rect = unsafe { &*new_size };
             let w = rect.right - rect.left;
             let h = rect.bottom - rect.top;
-            let mut wr = windows_sys::Win32::Foundation::RECT {
-                left: 0,
-                top: 0,
-                right: w,
-                bottom: h,
-            };
-            unsafe {
-                AdjustWindowRect(&mut wr, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0);
-            }
-            let adj_w = wr.right - wr.left;
-            let adj_h = wr.bottom - wr.top;
-            unsafe {
-                SetWindowPos(hwnd, 0, 0, 0, adj_w, adj_h, SWP_NOMOVE | SWP_NOZORDER);
-            }
+            let mut wr = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: w, bottom: h };
+            unsafe { AdjustWindowRect(&mut wr, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0); }
+            unsafe { SetWindowPos(hwnd, 0, 0, 0, wr.right - wr.left, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER); }
         }
     }
-    let _ = (this, new_size);
     kResultOk
 }
 
+#[cfg(target_os = "windows")]
+fn pump_message_queue(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
+    unsafe {
+        let mut msg: MSG = std::mem::zeroed();
+        while PeekMessageW(&mut msg, hwnd, 0, 0, PM_REMOVE) != 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "C" {
+    #[link_name = "seh_call_plug_view_attached"]
+    fn seh_call_plug_view_attached(com_obj: *mut c_void, parent: *mut c_void, type_: *const i8) -> i32;
+    #[link_name = "seh_call_is_platform_type_supported"]
+    fn seh_call_is_platform_type_supported(com_obj: *mut c_void, type_: *const i8) -> i32;
+    #[link_name = "seh_call_create_view"]
+    fn seh_call_create_view(com_obj: *mut c_void, name: *const i8) -> *mut c_void;
+    #[link_name = "seh_call_plug_view_get_size"]
+    fn seh_call_plug_view_get_size(com_obj: *mut c_void, rect: *mut c_void) -> i32;
+    #[link_name = "seh_call_plug_view_set_frame"]
+    fn seh_call_plug_view_set_frame(com_obj: *mut c_void, frame: *mut c_void) -> i32;
+    #[link_name = "seh_call_plug_view_removed"]
+    fn seh_call_plug_view_removed(com_obj: *mut c_void) -> i32;
+}
+
+const SEH_CAUGHT: i32 = -2;
+
+fn is_valid_ptr(ptr: *mut c_void) -> bool {
+    !ptr.is_null() && (ptr as isize) != (SEH_CAUGHT as isize)
+}
+
+fn plug_view_attached_seh(plug_view: &ComPtr<IPlugView>, parent: *mut c_void, platform_type: *const i8) -> tresult {
+    #[cfg(target_os = "windows")]
+    {
+        let com_obj = plug_view.as_ptr() as *mut c_void;
+        if !is_valid_ptr(com_obj) { return -1; }
+        unsafe { seh_call_plug_view_attached(com_obj, parent, platform_type) }
+    }
+    #[cfg(not(target_os = "windows"))]
+    { unsafe { plug_view.attached(parent, platform_type) } }
+}
+
+fn plug_view_is_platform_type_supported_seh(plug_view: &ComPtr<IPlugView>, platform_type: *const i8) -> tresult {
+    #[cfg(target_os = "windows")]
+    {
+        let com_obj = plug_view.as_ptr() as *mut c_void;
+        if !is_valid_ptr(com_obj) { return -1; }
+        unsafe { seh_call_is_platform_type_supported(com_obj, platform_type) }
+    }
+    #[cfg(not(target_os = "windows"))]
+    { unsafe { plug_view.isPlatformTypeSupported(platform_type) } }
+}
+
+fn create_view_seh(edit_controller: &ComPtr<IEditController>, name: *const i8) -> *mut IPlugView {
+    #[cfg(target_os = "windows")]
+    {
+        let com_obj = edit_controller.as_ptr() as *mut c_void;
+        if !is_valid_ptr(com_obj) { return std::ptr::null_mut(); }
+        let result = unsafe { seh_call_create_view(com_obj, name) };
+        if !is_valid_ptr(result) { return std::ptr::null_mut(); }
+        result as *mut IPlugView
+    }
+    #[cfg(not(target_os = "windows"))]
+    { unsafe { edit_controller.createView(name) } }
+}
+
+fn plug_view_get_size_seh(plug_view: &ComPtr<IPlugView>, rect: &mut ViewRect) -> tresult {
+    #[cfg(target_os = "windows")]
+    {
+        let com_obj = plug_view.as_ptr() as *mut c_void;
+        if !is_valid_ptr(com_obj) { return -1; }
+        unsafe { seh_call_plug_view_get_size(com_obj, rect as *mut _ as *mut c_void) }
+    }
+    #[cfg(not(target_os = "windows"))]
+    { unsafe { plug_view.getSize(rect) } }
+}
+
+fn plug_view_set_frame_seh(plug_view: &ComPtr<IPlugView>, frame: *mut IPlugFrame) -> tresult {
+    #[cfg(target_os = "windows")]
+    {
+        let com_obj = plug_view.as_ptr() as *mut c_void;
+        if !is_valid_ptr(com_obj) { return -1; }
+        unsafe { seh_call_plug_view_set_frame(com_obj, frame as *mut c_void) }
+    }
+    #[cfg(not(target_os = "windows"))]
+    { unsafe { plug_view.setFrame(frame) } }
+}
+
+fn plug_view_removed_seh(plug_view: &ComPtr<IPlugView>) -> tresult {
+    #[cfg(target_os = "windows")]
+    {
+        let com_obj = plug_view.as_ptr() as *mut c_void;
+        if !is_valid_ptr(com_obj) { return -1; }
+        unsafe { seh_call_plug_view_removed(com_obj) }
+    }
+    #[cfg(not(target_os = "windows"))]
+    { unsafe { plug_view.removed() } }
+}
+
 fn create_host_plug_frame() -> *mut IPlugFrame {
-    let frame = Box::new(HostPlugFrame {
-        vtbl: &HOST_FRAME_VTBL,
-        ref_count: AtomicUsize::new(1),
-        #[cfg(target_os = "windows")]
-        hwnd: AtomicUsize::new(0),
-    });
+    let frame = Box::new(HostPlugFrame { vtbl: &HOST_FRAME_VTBL, ref_count: AtomicUsize::new(1), #[cfg(target_os = "windows")] hwnd: AtomicUsize::new(0) });
     Box::into_raw(frame) as *mut IPlugFrame
 }
 
 #[cfg(target_os = "windows")]
 fn set_frame_hwnd(frame_ptr: *mut IPlugFrame, hwnd: HWND) {
-    if frame_ptr.is_null() {
-        return;
-    }
-    unsafe {
-        let frame = frame_ptr as *const HostPlugFrame;
-        (*frame).hwnd.store(hwnd as usize, Ordering::Release);
-    }
+    if frame_ptr.is_null() { return; }
+    unsafe { let frame = frame_ptr as *const HostPlugFrame; (*frame).hwnd.store(hwnd as usize, Ordering::Release); }
 }
 
 #[cfg(target_os = "windows")]
 const K_PLATFORM_TYPE_HWND: *const i8 = b"HWND\0".as_ptr() as *const i8;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum EditorMode {
-    SeparateWindow,
-    #[allow(dead_code)]
-    Embedded,
-}
+pub enum EditorMode { SeparateWindow, #[allow(dead_code)] Embedded }
 
 pub struct PluginEditor {
     plug_view: Option<ComPtr<IPlugView>>,
@@ -192,84 +264,44 @@ pub struct PluginEditor {
 impl PluginEditor {
     pub fn new() -> Self {
         ensure_window_class_registered();
-        Self {
-            plug_view: None,
-            plug_frame: std::ptr::null_mut(),
-            #[cfg(target_os = "windows")]
-            window_hwnd: None,
-            is_open: false,
-            mode: EditorMode::SeparateWindow,
-        }
+        Self { plug_view: None, plug_frame: std::ptr::null_mut(), #[cfg(target_os = "windows")] window_hwnd: None, is_open: false, mode: EditorMode::SeparateWindow }
     }
 
-    pub fn open_separate_window(
-        &mut self,
-        edit_controller: &ComPtr<IEditController>,
-        plugin_name: &str,
-        parent_hwnd: Option<*mut c_void>,
-    ) -> anyhow::Result<()> {
-        self.open_internal(
-            edit_controller,
-            parent_hwnd,
-            EditorMode::SeparateWindow,
-            plugin_name,
-        )
+    pub fn open_separate_window(&mut self, edit_controller: &ComPtr<IEditController>, plugin_name: &str, parent_hwnd: Option<*mut c_void>) -> anyhow::Result<()> {
+        self.open_internal(edit_controller, parent_hwnd, EditorMode::SeparateWindow, plugin_name)
     }
 
-    #[allow(dead_code)]
-    pub fn open_embedded(
-        &mut self,
-        edit_controller: &ComPtr<IEditController>,
-        parent_hwnd: *mut c_void,
-        plugin_name: &str,
-    ) -> anyhow::Result<()> {
-        if parent_hwnd.is_null() {
-            return Err(anyhow::anyhow!("No parent HWND for embedded mode"));
-        }
-        self.open_internal(
-            edit_controller,
-            Some(parent_hwnd),
-            EditorMode::Embedded,
-            plugin_name,
-        )
-    }
-
-    fn open_internal(
-        &mut self,
-        edit_controller: &ComPtr<IEditController>,
-        parent_hwnd: Option<*mut c_void>,
-        mode: EditorMode,
-        plugin_name: &str,
-    ) -> anyhow::Result<()> {
-        if self.is_open {
-            self.close();
-        }
-
+    fn open_internal(&mut self, edit_controller: &ComPtr<IEditController>, parent_hwnd: Option<*mut c_void>, mode: EditorMode, plugin_name: &str) -> anyhow::Result<()> {
+        if self.is_open { self.close(); }
         self.mode = mode;
 
-        let view_ptr = unsafe { edit_controller.createView(b"editor\0".as_ptr() as *const i8) };
-        if view_ptr.is_null() {
-            return Err(anyhow::anyhow!("Plugin does not provide an editor view"));
+        log::info!("open_internal: calling createView for '{}'", plugin_name);
+        let view_ptr = create_view_seh(edit_controller, b"editor\0".as_ptr() as *const i8);
+        if view_ptr.is_null() { 
+            log::error!("open_internal: createView returned null or crashed");
+            return Err(anyhow::anyhow!("Plugin editor view failed to create or crashed")); 
         }
+        log::info!("open_internal: createView returned {:p}", view_ptr);
 
-        let plug_view: ComPtr<IPlugView> = unsafe {
-            ComPtr::from_raw(view_ptr as *mut IPlugView)
-                .ok_or_else(|| anyhow::anyhow!("Failed to wrap IPlugView"))?
-        };
+        let plug_view = unsafe { ComPtr::from_raw(view_ptr as *mut IPlugView).unwrap() };
 
         #[cfg(target_os = "windows")]
         {
-            let supported = unsafe { plug_view.isPlatformTypeSupported(K_PLATFORM_TYPE_HWND) };
+            let supported = plug_view_is_platform_type_supported_seh(&plug_view, K_PLATFORM_TYPE_HWND);
+            log::info!("open_internal: isPlatformTypeSupported returned {}", supported);
             if supported != kResultOk {
-                return Err(anyhow::anyhow!("Plugin does not support HWND platform"));
+                return Err(anyhow::anyhow!("Plugin does not support HWND"));
             }
         }
 
         let (w, h) = Self::query_view_size(&plug_view).unwrap_or((600, 400));
+        log::info!("open_internal: initial view size {}x{}", w, h);
 
         let frame_ptr = create_host_plug_frame();
-        unsafe {
-            plug_view.setFrame(frame_ptr);
+        log::info!("open_internal: calling setFrame {:p}", frame_ptr);
+        let sf_res = plug_view_set_frame_seh(&plug_view, frame_ptr);
+        if sf_res != kResultOk {
+            log::warn!("open_internal: setFrame returned {}", sf_res);
         }
         self.plug_frame = frame_ptr;
 
@@ -277,185 +309,86 @@ impl PluginEditor {
             EditorMode::SeparateWindow => {
                 #[cfg(target_os = "windows")]
                 {
-                    let parent = parent_hwnd.map(|p| p as HWND).unwrap_or(0);
-                    let hwnd = self.create_editor_window(plugin_name, w, h, parent)?;
+                    // Use 0 as parent for better stability in SeparateWindow mode
+                    let hwnd = self.create_editor_window(plugin_name, w, h, 0)?;
                     set_frame_hwnd(frame_ptr, hwnd);
-                    unsafe {
-                        let result = plug_view.attached(hwnd as *mut c_void, K_PLATFORM_TYPE_HWND);
-                        if result != kResultOk {
-                            DestroyWindow(hwnd);
-                            return Err(anyhow::anyhow!("IPlugView::attached() failed"));
-                        }
+                    unsafe { ShowWindow(hwnd, SW_SHOW); UpdateWindow(hwnd); }
+                    pump_message_queue(hwnd);
+                    
+                    log::info!("open_internal: calling attached hwnd={:p}", hwnd as *mut c_void);
+                    let result = plug_view_attached_seh(&plug_view, hwnd as *mut c_void, K_PLATFORM_TYPE_HWND);
+                    log::info!("open_internal: attached returned {}", result);
+                    if result != kResultOk {
+                        unsafe { DestroyWindow(hwnd); }
+                        return Err(anyhow::anyhow!("IPlugView::attached() failed or crashed (result={})", result));
                     }
+                    pump_message_queue(hwnd);
                     self.window_hwnd = Some(hwnd);
                 }
                 #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = (w, h, plugin_name, parent_hwnd);
-                    return Err(anyhow::anyhow!(
-                        "Separate window not supported on this platform"
-                    ));
-                }
+                { return Err(anyhow::anyhow!("Not supported")); }
             }
             EditorMode::Embedded => {
                 let parent = parent_hwnd.unwrap_or(std::ptr::null_mut());
                 #[cfg(target_os = "windows")]
-                {
-                    unsafe {
-                        let result = plug_view.attached(parent, K_PLATFORM_TYPE_HWND);
-                        if result != kResultOk {
-                            return Err(anyhow::anyhow!("IPlugView::attached() failed"));
-                        }
-                    }
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = parent;
-                }
+                { if plug_view_attached_seh(&plug_view, parent, K_PLATFORM_TYPE_HWND) != kResultOk { return Err(anyhow::anyhow!("attached failed")); } }
+                #[cfg(not(target_os = "windows"))] { let _ = parent; }
             }
         }
 
         self.plug_view = Some(plug_view);
         self.is_open = true;
+        log::info!("open_internal: editor opened successfully");
         Ok(())
     }
 
     pub fn close(&mut self) {
-        if !self.is_open {
-            return;
-        }
-
-        if let Some(plug_view) = self.plug_view.take() {
-            unsafe {
-                let _ = plug_view.removed();
-            }
-        }
-
+        if !self.is_open { return; }
+        if let Some(plug_view) = self.plug_view.take() { let _ = plug_view_removed_seh(&plug_view); }
         #[cfg(target_os = "windows")]
-        {
-            if let Some(hwnd) = self.window_hwnd.take() {
-                unsafe {
-                    DestroyWindow(hwnd);
-                }
-            }
-        }
-
+        { if let Some(hwnd) = self.window_hwnd.take() { unsafe { DestroyWindow(hwnd); } } }
         if !self.plug_frame.is_null() {
             unsafe {
                 let frame = self.plug_frame as *const HostPlugFrame;
-                let vtbl = (*frame).vtbl;
-                ((*vtbl).release)(self.plug_frame as *mut c_void);
+                ((*(*frame).vtbl).release)(self.plug_frame as *mut c_void);
             }
             self.plug_frame = std::ptr::null_mut();
         }
-
         self.is_open = false;
     }
 
-    pub fn is_open(&self) -> bool {
-        self.is_open
-    }
-
-    #[allow(dead_code)]
-    pub fn mode(&self) -> EditorMode {
-        self.mode
-    }
-
-    #[cfg(target_os = "windows")]
-    #[allow(dead_code)]
-    pub fn window_hwnd(&self) -> Option<HWND> {
-        self.window_hwnd
-    }
-
-    #[allow(dead_code)]
-    pub fn get_size(&self) -> Option<(i32, i32)> {
-        self.plug_view
-            .as_ref()
-            .and_then(|v| Self::query_view_size(v))
-    }
+    pub fn is_open(&self) -> bool { self.is_open }
 
     fn query_view_size(view: &ComPtr<IPlugView>) -> Option<(i32, i32)> {
-        let mut rect = ViewRect {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        unsafe {
-            let result = view.getSize(&mut rect);
-            if result == kResultOk {
-                return Some((rect.right - rect.left, rect.bottom - rect.top));
-            }
+        let mut rect = ViewRect { left: 0, top: 0, right: 0, bottom: 0 };
+        if plug_view_get_size_seh(view, &mut rect) == kResultOk {
+            return Some((rect.right - rect.left, rect.bottom - rect.top));
         }
         None
     }
 
     #[cfg(target_os = "windows")]
-    fn create_editor_window(
-        &self,
-        title: &str,
-        width: i32,
-        height: i32,
-        parent_hwnd: HWND,
-    ) -> anyhow::Result<HWND> {
+    fn create_editor_window(&self, title: &str, width: i32, height: i32, parent_hwnd: HWND) -> anyhow::Result<HWND> {
         let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-        let class_name = get_editor_class_name();
-
-        let mut wr = windows_sys::Win32::Foundation::RECT {
-            left: 0,
-            top: 0,
-            right: width,
-            bottom: height,
-        };
-        unsafe {
-            AdjustWindowRect(&mut wr, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0);
-        }
-
+        let mut wr = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: width, bottom: height };
+        unsafe { AdjustWindowRect(&mut wr, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0); }
         let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_CONTROLPARENT,
-                class_name.as_ptr(),
-                title_wide.as_ptr(),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                wr.right - wr.left,
-                wr.bottom - wr.top,
-                parent_hwnd,
-                0,
-                get_module_handle(),
-                std::ptr::null_mut(),
-            )
+            CreateWindowExW(WS_EX_CONTROLPARENT, get_editor_class_name().as_ptr(), title_wide.as_ptr(),
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+                wr.right - wr.left, wr.bottom - wr.top, parent_hwnd, 0, get_module_handle(), std::ptr::null_mut())
         };
-
-        if hwnd == 0 {
-            return Err(anyhow::anyhow!("CreateWindowExW failed"));
-        }
-
-        unsafe {
-            ShowWindow(hwnd, SW_SHOW);
-            UpdateWindow(hwnd);
-        }
-
+        if hwnd == 0 { return Err(anyhow::anyhow!("CreateWindowExW failed")); }
         Ok(hwnd)
     }
 }
 
-impl Drop for PluginEditor {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
+impl Drop for PluginEditor { fn drop(&mut self) { self.close(); } }
 
 pub fn extract_hwnd_from_frame(frame: &eframe::Frame) -> anyhow::Result<*mut c_void> {
     use raw_window_handle::HasWindowHandle;
-    let handle = frame
-        .window_handle()
-        .map_err(|e| anyhow::anyhow!("Failed to get window handle: {:?}", e))?;
+    let handle = frame.window_handle().map_err(|e| anyhow::anyhow!("Failed handle: {:?}", e))?;
     match handle.as_raw() {
-        raw_window_handle::RawWindowHandle::Win32(win32_handle) => {
-            Ok(win32_handle.hwnd.get() as *mut c_void)
-        }
-        _ => Err(anyhow::anyhow!("Not a Win32 window")),
+        raw_window_handle::RawWindowHandle::Win32(win32_handle) => Ok(win32_handle.hwnd.get() as *mut c_void),
+        _ => Err(anyhow::anyhow!("Not Win32")),
     }
 }

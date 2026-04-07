@@ -209,13 +209,19 @@ impl AudioEngine {
         let output_range = find_f32_output_config_range(&output_device, 48000)
             .ok_or_else(|| anyhow::anyhow!("No f32 output config found"))?;
 
-        let output_config = config_from_range(output_range, 48000, 256);
-        let sample_rate = output_config.sample_rate.0 as f64;
-        let buffer_size = match output_config.buffer_size {
+        let out_config = config_from_range(output_range, 48000, 256);
+        let sample_rate = out_config.sample_rate.0 as f64;
+        if sample_rate <= 0.0 {
+            return Err(anyhow::anyhow!("Invalid sample rate from device: {}", sample_rate));
+        }
+        let buffer_size = match out_config.buffer_size {
             BufferSize::Fixed(bs) => bs,
             BufferSize::Default => 256,
         };
-        let out_channels = output_config.channels as usize;
+        let out_channels = out_config.channels as usize;
+        if out_channels == 0 {
+            return Err(anyhow::anyhow!("Output device has 0 channels"));
+        }
 
         let in_channels = host
             .default_input_device()
@@ -291,6 +297,9 @@ impl AudioEngine {
 
         let out_config = config_from_range(output_range, self.sample_rate as u32, self.buffer_size);
         let out_ch_count = out_config.channels as usize;
+        if out_ch_count == 0 {
+            return Err(anyhow::anyhow!("Output device has 0 channels"));
+        }
 
         let cmd_rx = self.command_rx.clone();
 
@@ -317,33 +326,37 @@ impl AudioEngine {
             if let Some(in_range) = find_f32_input_config_range(&in_dev, self.sample_rate as u32) {
                 let in_cfg = config_from_range(in_range, self.sample_rate as u32, self.buffer_size);
                 let in_ch_count = in_cfg.channels as usize;
-                let buf = input_buffer.clone();
+                if in_ch_count > 0 {
+                    let buf = input_buffer.clone();
 
-                let in_stream = in_dev.build_input_stream(
-                    &in_cfg,
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        let channels = in_ch_count;
-                        let num_frames = data.len() / channels;
-                        let mut captured = Vec::with_capacity(channels);
-                        for ch in 0..channels {
-                            let ch_data: Vec<f32> =
-                                (0..num_frames).map(|f| data[f * channels + ch]).collect();
-                            captured.push(ch_data);
-                        }
-                        let mut guard = buf.lock();
-                        guard.push_back(captured);
-                        if guard.len() > 32 {
-                            guard.pop_front();
-                        }
-                    },
-                    |err| log::error!("Input stream error: {}", err),
-                    None,
-                );
+                    let in_stream = in_dev.build_input_stream(
+                        &in_cfg,
+                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            let channels = in_ch_count;
+                            let num_frames = data.len() / channels;
+                            let mut captured = Vec::with_capacity(channels);
+                            for ch in 0..channels {
+                                let ch_data: Vec<f32> =
+                                    (0..num_frames).map(|f| data[f * channels + ch]).collect();
+                                captured.push(ch_data);
+                            }
+                            let mut guard = buf.lock();
+                            guard.push_back(captured);
+                            if guard.len() > 32 {
+                                guard.pop_front();
+                            }
+                        },
+                        |err| log::error!("Input stream error: {}", err),
+                        None,
+                    );
 
-                if let Ok(stream) = in_stream {
-                    if stream.play().is_ok() {
-                        self.input_stream = Some(stream);
+                    if let Ok(stream) = in_stream {
+                        if stream.play().is_ok() {
+                            self.input_stream = Some(stream);
+                        }
                     }
+                } else {
+                    log::warn!("Input stream has 0 channels, skipping");
                 }
             }
         }
@@ -351,7 +364,7 @@ impl AudioEngine {
         let out_stream = output_device.build_output_stream(
             &out_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let channels = out_ch_count;
+                let channels = out_ch_count.max(1);
                 let num_frames = data.len() / channels;
 
                 let gain = *input_gain.lock();

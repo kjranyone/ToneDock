@@ -34,6 +34,9 @@ impl LooperBuffer {
     }
 
     fn record_frame(&mut self, input: &[&[f32]], num_frames: usize) {
+        if self.capacity == 0 {
+            return;
+        }
         for frame in 0..num_frames {
             for ch in 0..self.channels.min(input.len()) {
                 if self.write_pos < self.capacity {

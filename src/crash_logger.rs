@@ -5,7 +5,10 @@ use std::sync::Mutex;
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
-    Foundation::{EXCEPTION_ACCESS_VIOLATION, EXCEPTION_STACK_OVERFLOW},
+    Foundation::{
+        EXCEPTION_ACCESS_VIOLATION, EXCEPTION_INT_DIVIDE_BY_ZERO, EXCEPTION_STACK_OVERFLOW,
+        STATUS_FATAL_APP_EXIT,
+    },
     System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS},
 };
 
@@ -114,9 +117,15 @@ pub fn init() {
 }
 
 #[cfg(target_os = "windows")]
+static IN_HANDLER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
 unsafe extern "system" fn vecored_exception_handler(
     exception_info: *mut EXCEPTION_POINTERS,
 ) -> i32 {
+    if IN_HANDLER.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return 1;
+    }
     unsafe {
         if exception_info.is_null() {
             return 1;
@@ -128,6 +137,20 @@ unsafe extern "system" fn vecored_exception_handler(
         }
 
         let code = (*record).ExceptionCode;
+        let addr = (*record).ExceptionAddress;
+
+        let context = (*exception_info).ContextRecord;
+        let rip = if !context.is_null() {
+            Some((*context).Rip)
+        } else {
+            None
+        };
+
+        let mut extra = String::new();
+        extra.push_str(&format!("ExceptionAddress: 0x{:016X}\n", addr as usize));
+        if let Some(rip) = rip {
+            extra.push_str(&format!("RIP: 0x{:016X}\n", rip));
+        }
 
         if code == EXCEPTION_ACCESS_VIOLATION {
             let addr = (*record).ExceptionInformation[1];
@@ -146,6 +169,7 @@ unsafe extern "system" fn vecored_exception_handler(
                 "\n!!! NATIVE CRASH: ACCESS VIOLATION !!!\n\
                  Code: 0x{:08X} (Access Violation)\n\
                  Operation: {} at address 0x{:016X}\n\
+                 {extra}\
                  Time: {}\n\
                  This is likely caused by a VST3 plugin calling into invalid memory.\n",
                 code,
@@ -163,6 +187,51 @@ unsafe extern "system" fn vecored_exception_handler(
             let msg = format!(
                 "\n!!! NATIVE CRASH: STACK OVERFLOW !!!\n\
                  Code: 0x{:08X}\n\
+                 {extra}\
+                 Time: {}\n",
+                code,
+                chrono_free_timestamp(),
+            );
+            eprintln!("{}", msg);
+            if let Ok(mut f) = OpenOptions::new().append(true).open(log_file_path()) {
+                let _ = f.write_all(msg.as_bytes());
+                let _ = f.flush();
+            }
+        } else if code == STATUS_FATAL_APP_EXIT {
+            let msg = format!(
+                "\n!!! NATIVE CRASH: FATAL APP EXIT !!!\n\
+                 Code: 0x{:08X} (STATUS_FATAL_APP_EXIT)\n\
+                 {extra}\
+                 Time: {}\n\
+                 Likely a VST3 plugin called abort() or std::terminate().\n",
+                code,
+                chrono_free_timestamp(),
+            );
+            eprintln!("{}", msg);
+            if let Ok(mut f) = OpenOptions::new().append(true).open(log_file_path()) {
+                let _ = f.write_all(msg.as_bytes());
+                let _ = f.flush();
+            }
+        } else if code == EXCEPTION_INT_DIVIDE_BY_ZERO {
+            let msg = format!(
+                "\n!!! NATIVE CRASH: INTEGER DIVIDE BY ZERO !!!\n\
+                 Code: 0x{:08X} (EXCEPTION_INT_DIVIDE_BY_ZERO)\n\
+                 {extra}\
+                 Time: {}\n\
+                 Likely a VST3 plugin performed an integer division by zero.\n",
+                code,
+                chrono_free_timestamp(),
+            );
+            eprintln!("{}", msg);
+            if let Ok(mut f) = OpenOptions::new().append(true).open(log_file_path()) {
+                let _ = f.write_all(msg.as_bytes());
+                let _ = f.flush();
+            }
+        } else {
+            let msg = format!(
+                "\n!!! NATIVE CRASH: UNKNOWN !!!\n\
+                 Code: 0x{:08X}\n\
+                 {extra}\
                  Time: {}\n",
                 code,
                 chrono_free_timestamp(),
