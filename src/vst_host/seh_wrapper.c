@@ -43,8 +43,18 @@ extern "C" {
 #define VST3_API __stdcall
 
 static __declspec(thread) int g_seh_depth = 0;
+static __declspec(thread) unsigned long g_last_seh_code = 0;
+static __declspec(thread) void* g_last_seh_addr = 0;
+static __declspec(thread) unsigned long long g_last_seh_rdi = 0;
+static __declspec(thread) unsigned long long g_last_seh_rax = 0;
+static __declspec(thread) unsigned long long g_last_seh_rdx = 0;
 
 int seh_get_protected_depth(void) { return g_seh_depth; }
+unsigned long seh_get_last_exception_code(void) { return g_last_seh_code; }
+void* seh_get_last_exception_address(void) { return g_last_seh_addr; }
+unsigned long long seh_get_last_exception_rdi(void) { return g_last_seh_rdi; }
+unsigned long long seh_get_last_exception_rax(void) { return g_last_seh_rax; }
+unsigned long long seh_get_last_exception_rdx(void) { return g_last_seh_rdx; }
 
 /* ---- FUnknown [0-2] ---- */
 
@@ -138,6 +148,20 @@ long seh_call_terminate(void* com_obj)
 
 /* ---- IComponent (base: IPluginBase[0-4]) [5-13] ---- */
 
+long seh_call_get_controller_class_id(void* com_obj, void* class_id)
+{
+    if (!com_obj) return -1;
+    ++g_seh_depth;
+    void** vtable = *(void***)com_obj;
+    typedef long (VST3_API *Fn)(void*, void*);
+    Fn fn = (Fn)vtable[5];
+    long result = -1;
+    __try { result = fn(com_obj, class_id); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
+    return result;
+}
+
 long seh_call_set_io_mode(void* com_obj, int mode)
 {
     if (!com_obj) return -1;
@@ -187,6 +211,20 @@ long seh_call_set_active(void* com_obj, unsigned char state)
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, unsigned char);
     Fn fn = (Fn)vtable[11];
+    long result = -1;
+    __try { result = fn(com_obj, state); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
+    return result;
+}
+
+long seh_call_component_get_state(void* com_obj, void* state)
+{
+    if (!com_obj) return -1;
+    ++g_seh_depth;
+    void** vtable = *(void***)com_obj;
+    typedef long (VST3_API *Fn)(void*, void*);
+    Fn fn = (Fn)vtable[13];
     long result = -1;
     __try { result = fn(com_obj, state); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
@@ -283,6 +321,20 @@ long seh_call_process_robust(void* com_obj, int num_samples, int num_inputs, voi
 
 /* ---- IEditController (base: IPluginBase[0-4]) [5-17] ---- */
 
+long seh_call_set_component_state(void* com_obj, void* state)
+{
+    if (!com_obj) return -1;
+    ++g_seh_depth;
+    void** vtable = *(void***)com_obj;
+    typedef long (VST3_API *Fn)(void*, void*);
+    Fn fn = (Fn)vtable[5];
+    long result = -1;
+    __try { result = fn(com_obj, state); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
+    return result;
+}
+
 long seh_call_set_component_handler(void* com_obj, void* handler)
 {
     if (!com_obj) return -1;
@@ -367,6 +419,36 @@ void* seh_call_create_view(void* com_obj, const char* name)
     return result;
 }
 
+/* ---- IConnectionPoint (base: FUnknown[0-2]) [3-5] ---- */
+
+long seh_call_connection_point_connect(void* com_obj, void* other)
+{
+    if (!com_obj) return -1;
+    ++g_seh_depth;
+    void** vtable = *(void***)com_obj;
+    typedef long (VST3_API *Fn)(void*, void*);
+    Fn fn = (Fn)vtable[3];
+    long result = -1;
+    __try { result = fn(com_obj, other); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
+    return result;
+}
+
+long seh_call_connection_point_disconnect(void* com_obj, void* other)
+{
+    if (!com_obj) return -1;
+    ++g_seh_depth;
+    void** vtable = *(void***)com_obj;
+    typedef long (VST3_API *Fn)(void*, void*);
+    Fn fn = (Fn)vtable[4];
+    long result = -1;
+    __try { result = fn(com_obj, other); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
+    return result;
+}
+
 /* ---- IPlugView (base: FUnknown[0-2]) [3-14] ---- */
 
 long seh_call_is_platform_type_supported(void* com_obj, const char* type)
@@ -383,16 +465,39 @@ long seh_call_is_platform_type_supported(void* com_obj, const char* type)
     return result;
 }
 
+static long __cdecl seh_capture_filter(EXCEPTION_POINTERS* ep)
+{
+    g_last_seh_code = ep->ExceptionRecord->ExceptionCode;
+    g_last_seh_addr = ep->ExceptionRecord->ExceptionAddress;
+    if (ep->ContextRecord) {
+#ifdef _WIN64
+        g_last_seh_rdi = ep->ContextRecord->Rdi;
+        g_last_seh_rax = ep->ContextRecord->Rax;
+        g_last_seh_rdx = ep->ContextRecord->Rdx;
+#else
+        g_last_seh_rdi = 0;
+        g_last_seh_rax = 0;
+        g_last_seh_rdx = 0;
+#endif
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 long seh_call_plug_view_attached(void* com_obj, void* parent, const char* type)
 {
     if (!com_obj) return -1;
     ++g_seh_depth;
+    g_last_seh_code = 0;
+    g_last_seh_addr = 0;
+    g_last_seh_rdi = 0;
+    g_last_seh_rax = 0;
+    g_last_seh_rdx = 0;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, void*, const char*);
     Fn fn = (Fn)vtable[4];
     long result = -1;
     __try { result = fn(com_obj, parent, type); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    __except (seh_capture_filter(GetExceptionInformation())) { result = -2; }
     --g_seh_depth;
     return result;
 }
@@ -434,6 +539,20 @@ long seh_call_plug_view_set_frame(void* com_obj, void* frame)
     Fn fn = (Fn)vtable[12];
     long result = -1;
     __try { result = fn(com_obj, frame); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
+    return result;
+}
+
+long seh_call_set_content_scale_factor(void* com_obj, float factor)
+{
+    if (!com_obj) return -1;
+    ++g_seh_depth;
+    void** vtable = *(void***)com_obj;
+    typedef long (VST3_API *Fn)(void*, float);
+    Fn fn = (Fn)vtable[3];
+    long result = -1;
+    __try { result = fn(com_obj, factor); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
     --g_seh_depth;
     return result;

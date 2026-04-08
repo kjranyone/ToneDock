@@ -11,11 +11,17 @@ use vst3::Steinberg::{IPlugFrame, IPlugView, ViewRect};
 use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::Gdi::UpdateWindow,
+    System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED},
+    System::LibraryLoader::{
+        GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+    },
+    UI::HiDpi::GetDpiForWindow,
     UI::WindowsAndMessaging::{
         AdjustWindowRect, CreateWindowExW, DefWindowProcW, DestroyWindow, IsWindow, LoadCursorW,
-        RegisterClassW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW,
-        SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_CONTROLPARENT,
-        WS_OVERLAPPEDWINDOW,
+        MoveWindow, RegisterClassW, SetWindowPos, ShowWindow, CS_DBLCLKS, CS_HREDRAW, CS_OWNDC,
+        CS_VREDRAW,
+        CW_USEDEFAULT, IDC_ARROW, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WNDCLASSW, WS_CHILD,
+        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     },
 };
 
@@ -51,7 +57,7 @@ fn ensure_window_class_registered() {
         EDITOR_CLASS_REGISTERED.call_once(|| unsafe {
             let class_name = get_editor_class_name();
             let wc = WNDCLASSW {
-                style: CS_HREDRAW | CS_VREDRAW,
+                style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS | CS_OWNDC,
                 lpfnWndProc: Some(editor_wnd_proc),
                 hInstance: get_module_handle(),
                 lpszClassName: class_name.as_ptr(),
@@ -164,6 +170,13 @@ unsafe extern "system" fn host_frame_resize_view(
                     wr.bottom - wr.top,
                     SWP_NOMOVE | SWP_NOZORDER,
                 );
+                let child = windows_sys::Win32::UI::WindowsAndMessaging::GetWindow(
+                    hwnd,
+                    windows_sys::Win32::UI::WindowsAndMessaging::GW_CHILD,
+                );
+                if child != 0 {
+                    MoveWindow(child, 0, 0, w, h, 1);
+                }
             }
         }
     }
@@ -202,6 +215,16 @@ unsafe extern "C" {
     fn seh_call_plug_view_set_frame(com_obj: *mut c_void, frame: *mut c_void) -> i32;
     #[link_name = "seh_call_plug_view_removed"]
     fn seh_call_plug_view_removed(com_obj: *mut c_void) -> i32;
+    #[link_name = "seh_get_last_exception_code"]
+    fn seh_get_last_exception_code() -> u32;
+    #[link_name = "seh_get_last_exception_address"]
+    fn seh_get_last_exception_address() -> *mut c_void;
+    #[link_name = "seh_get_last_exception_rdi"]
+    fn seh_get_last_exception_rdi() -> u64;
+    #[link_name = "seh_get_last_exception_rax"]
+    fn seh_get_last_exception_rax() -> u64;
+    #[link_name = "seh_get_last_exception_rdx"]
+    fn seh_get_last_exception_rdx() -> u64;
 }
 
 const SEH_CAUGHT: i32 = -2;
@@ -400,6 +423,18 @@ impl PluginEditor {
         }
         self.mode = mode;
 
+        #[cfg(target_os = "windows")]
+        {
+            let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+            if hr as u32 == 0x80010106u32 {
+                log::warn!("open_internal: CoInitializeEx returned RPC_E_CHANGED_MODE (thread already in MTA)");
+            } else if hr < 0 {
+                log::warn!("open_internal: CoInitializeEx returned 0x{:08X}", hr as u32);
+            } else {
+                log::info!("open_internal: CoInitializeEx succeeded (STA)");
+            }
+        }
+
         log::info!("open_internal: calling createView for '{}'", plugin_name);
         let view_ptr = create_view_seh(edit_controller, b"editor\0".as_ptr() as *const i8);
         if view_ptr.is_null() {
@@ -439,37 +474,129 @@ impl PluginEditor {
             EditorMode::SeparateWindow => {
                 #[cfg(target_os = "windows")]
                 {
-                    let hwnd = self.create_editor_window(plugin_name, w, h, 0)?;
+                    let owner = parent_hwnd.map(|p| p as HWND).unwrap_or(0);
+                    let hwnd = self.create_editor_window(plugin_name, w, h, owner)?;
                     set_frame_hwnd(frame_ptr, hwnd);
+
+                    let child_hwnd = unsafe {
+                        CreateWindowExW(
+                            0,
+                            get_editor_class_name().as_ptr(),
+                            std::ptr::null(),
+                            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                            0,
+                            0,
+                            w,
+                            h,
+                            hwnd,
+                            0,
+                            get_module_handle(),
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    if child_hwnd == 0 {
+                        unsafe {
+                            DestroyWindow(hwnd);
+                        }
+                        return Err(anyhow::anyhow!(
+                            "CreateWindowExW for child container failed"
+                        ));
+                    }
+                    log::warn!(
+                        "open_internal: frame={:p} child={:p} size={}x{}",
+                        hwnd as *mut c_void,
+                        child_hwnd as *mut c_void,
+                        w,
+                        h
+                    );
+
                     unsafe {
+                        MoveWindow(child_hwnd, 0, 0, w, h, 1);
                         ShowWindow(hwnd, SW_SHOW);
+                        ShowWindow(child_hwnd, SW_SHOW);
                         UpdateWindow(hwnd);
+                        UpdateWindow(child_hwnd);
+                    }
+                    let owner_dpi = unsafe { GetDpiForWindow(hwnd) };
+                    let child_dpi = unsafe { GetDpiForWindow(child_hwnd) };
+                    let mut owner_rect: windows_sys::Win32::Foundation::RECT = unsafe { std::mem::zeroed() };
+                    let mut child_rect: windows_sys::Win32::Foundation::RECT = unsafe { std::mem::zeroed() };
+                    unsafe {
+                        windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(
+                            hwnd,
+                            &mut owner_rect,
+                        );
+                        windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(
+                            child_hwnd,
+                            &mut child_rect,
+                        );
                     }
                     pump_message_queue(hwnd);
 
                     log::info!(
-                        "open_internal: calling attached hwnd={:p}",
-                        hwnd as *mut c_void
+                        "open_internal: owner dpi={} rect={}x{} child dpi={} rect={}x{} child={:p}",
+                        owner_dpi,
+                        owner_rect.right - owner_rect.left,
+                        owner_rect.bottom - owner_rect.top,
+                        child_dpi,
+                        child_rect.right - child_rect.left,
+                        child_rect.bottom - child_rect.top,
+                        child_hwnd as *mut c_void
                     );
                     let result = plug_view_attached_seh(
                         &plug_view,
-                        hwnd as *mut c_void,
+                        child_hwnd as *mut c_void,
                         K_PLATFORM_TYPE_HWND,
                     );
                     if result == SEH_CAUGHT {
-                        log::error!(
-                            "open_internal: attached() SEH crash in plugin '{}' (hwnd={:p})",
-                            plugin_name,
-                            hwnd as *mut c_void
+                        let code = unsafe { seh_get_last_exception_code() };
+                        let addr = unsafe { seh_get_last_exception_address() };
+                        let rdi = unsafe { seh_get_last_exception_rdi() };
+                        let rax = unsafe { seh_get_last_exception_rax() };
+                        let rdx = unsafe { seh_get_last_exception_rdx() };
+
+                        let mut mod_name = [0u16; 512];
+                        let mut mod_handle: windows_sys::Win32::Foundation::HMODULE = 0;
+                        unsafe {
+                            let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS as u32;
+                            if GetModuleHandleExW(flags, addr as *const _, &mut mod_handle) != 0 {
+                                GetModuleFileNameW(mod_handle, mod_name.as_mut_ptr(), 512);
+                            }
+                        }
+                        let _mod_str = String::from_utf16_lossy(
+                            &mod_name[..mod_name.iter().position(|&c| c == 0).unwrap_or(0)],
                         );
-                    } else if result != kResultOk {
+                        let rva = addr as usize - mod_handle as usize;
+
+                        // Dump [rdi] struct: 16 dwords
+                        let rdi_ptr = rdi as *const u32;
+                        let mut rdi_dump = [0u32; 16];
+                        unsafe {
+                            for k in 0..16 {
+                                let src = rdi_ptr.add(k);
+                                rdi_dump[k] = if src as usize > 0x10000 { *src } else { 0 };
+                            }
+                        }
+
                         log::error!(
-                            "open_internal: attached() returned {} for '{}'",
-                            result,
-                            plugin_name
+                            "open_internal: SEH 0x{:08X} rva={:#x} rdi={:#x} rax={:#x} rdx={:#x}",
+                            code,
+                            rva,
+                            rdi,
+                            rax,
+                            rdx
                         );
-                    } else {
-                        log::info!("open_internal: attached returned {}", result);
+                        log::error!(
+                            "open_internal: [rdi] = [{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
+                            rdi_dump[0], rdi_dump[1], rdi_dump[2], rdi_dump[3],
+                            rdi_dump[4], rdi_dump[5], rdi_dump[6], rdi_dump[7],
+                            rdi_dump[8], rdi_dump[9], rdi_dump[10], rdi_dump[11],
+                            rdi_dump[12], rdi_dump[13], rdi_dump[14], rdi_dump[15]
+                        );
+                        log::error!(
+                            "open_internal: [rdi+0x08]={} [rdi+0x0c]={} [rdi+0x10]={} [rdi+0x14]={}",
+                            rdi_dump[2], rdi_dump[3], rdi_dump[4], rdi_dump[5]
+                        );
                     }
                     if result != kResultOk {
                         let _ = plug_view_removed_seh(&plug_view);
@@ -478,9 +605,11 @@ impl PluginEditor {
                         }
                         release_host_plug_frame(frame_ptr);
                         let msg = if result == SEH_CAUGHT {
+                            let code = unsafe { seh_get_last_exception_code() };
+                            let addr = unsafe { seh_get_last_exception_address() };
                             format!(
-                                "IPlugView::attached() crashed (SEH) in plugin '{}'",
-                                plugin_name
+                                "IPlugView::attached() crashed (SEH 0x{:08X} at {:p}) in plugin '{}'",
+                                code, addr, plugin_name
                             )
                         } else {
                             format!(
@@ -547,6 +676,7 @@ impl PluginEditor {
 
         if let Some(plug_view) = self.plug_view.take() {
             if window_valid {
+                let _ = plug_view_set_frame_seh(&plug_view, std::ptr::null_mut());
                 let _ = plug_view_removed_seh(&plug_view);
             }
         }
@@ -656,5 +786,44 @@ pub fn extract_hwnd_from_frame(frame: &eframe::Frame) -> anyhow::Result<*mut c_v
             Ok(win32_handle.hwnd.get() as *mut c_void)
         }
         _ => Err(anyhow::anyhow!("Not Win32")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vst_host::plugin::LoadedPlugin;
+    use crate::vst_host::scanner::PluginInfo;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    #[test]
+    #[ignore]
+    fn smoke_open_plugin_editor() {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+        }
+        let path = std::env::var("TEST_VST_EDITOR_PATH").ok().map(PathBuf::from);
+        let Some(path) = path else {
+            return;
+        };
+
+        let mut plugin = LoadedPlugin::load(&PluginInfo {
+            path,
+            name: "EditorSmoke".into(),
+            vendor: "".into(),
+            category: "".into(),
+        })
+        .unwrap();
+        plugin.setup_processing(44100.0, 256).unwrap();
+        let edit_controller = plugin.edit_controller().cloned().unwrap();
+
+        let mut editor = PluginEditor::new();
+        editor
+            .open_separate_window(&edit_controller, "EditorSmoke", None)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        editor.close();
     }
 }
