@@ -63,3 +63,28 @@ cargo test smoke_open_plugin_editor -- --ignored --nocapture
 ```
 
 この smoke test は実プラグインをロードし、`setup_processing()` のあと editor を開いて短時間維持し、close まで確認する。
+
+## References
+
+今回の修正判断で直接参照した一次情報と、今後まず当たるべき資料。
+
+- Steinberg `IEditController`
+  https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IEditController.html
+- Steinberg `IHostApplication`
+  https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IHostApplication.html
+- Steinberg hosting example `plugprovider.cpp`
+  https://github.com/steinbergmedia/vst3_public_sdk/blob/master/source/vst/hosting/plugprovider.cpp
+- Steinberg host-side helper implementation `hostclasses.cpp`
+  https://github.com/steinbergmedia/vst3_public_sdk/blob/master/source/vst/hosting/hostclasses.cpp
+- iPlug2 Windows module initialization and `gHINSTANCE`
+  https://github.com/iPlug2/iPlug2/blob/master/IPlug/IPlug_include_in_plug_src.h
+- NeuralAmpModeler `OnUIOpen()` と delegate message 送信
+  https://github.com/sdatkinson/NeuralAmpModelerPlugin/blob/main/NeuralAmpModeler/NeuralAmpModeler.cpp
+
+## How these references map to ToneDock
+
+- `IEditController` docs では `setComponentState()` と `createView()` が `[UI-thread & Connected]` 前提になっている。ToneDock でも editor open 前に controller 接続と state 同期が必要。
+- Steinberg の `plugprovider.cpp` は single-component を試し、だめなら `getControllerClassId()` から separate controller を生成する流れになっている。ToneDock もこの順に寄せるべき。
+- `hostclasses.cpp` は `IHostApplication::createInstance()` で `IMessage` と `IAttributeList` を返している。ToneDock でも host object 未実装のままにしない。
+- iPlug2 側の module init 実装を見ると、Windows では `InitModule()` で `gHINSTANCE` を初期化している。ToneDock では VST3 exported `InitDll()` / `ExitDll()` を明示的に扱う必要がある。
+- NeuralAmpModeler 側は `OnUIOpen()` で `SendControlMsgFromDelegate(...)` を使う。UI open 時点で host message 系が使われる前提なので、controller/host object 実装が欠けていると壊れやすい。
