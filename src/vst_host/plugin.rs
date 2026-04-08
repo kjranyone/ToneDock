@@ -300,13 +300,28 @@ impl LoadedPlugin {
             ref_count: AtomicUsize::new(1),
         })) as *mut c_void;
         unsafe {
-            seh_call_initialize(obj_ptr, host_application);
+            let res = seh_call_initialize(obj_ptr, host_application);
+            if res != kResultOk {
+                log::warn!(
+                    "IComponent::initialize() returned {} for '{}'",
+                    res,
+                    info.name
+                );
+            }
         }
 
-        let num_inputs =
-            unsafe { seh_call_get_bus_count(obj_ptr, MEDIA_TYPE_AUDIO, BUS_DIR_INPUT) }.max(1);
-        let num_outputs =
-            unsafe { seh_call_get_bus_count(obj_ptr, MEDIA_TYPE_AUDIO, BUS_DIR_OUTPUT) }.max(1);
+        let num_inputs_raw =
+            unsafe { seh_call_get_bus_count(obj_ptr, MEDIA_TYPE_AUDIO, BUS_DIR_INPUT) };
+        if num_inputs_raw == SEH_CAUGHT {
+            log::error!("get_bus_count(input) SEH crash for '{}'", info.name);
+        }
+        let num_inputs = num_inputs_raw.max(1);
+        let num_outputs_raw =
+            unsafe { seh_call_get_bus_count(obj_ptr, MEDIA_TYPE_AUDIO, BUS_DIR_OUTPUT) };
+        if num_outputs_raw == SEH_CAUGHT {
+            log::error!("get_bus_count(output) SEH crash for '{}'", info.name);
+        }
+        let num_outputs = num_outputs_raw.max(1);
 
         let mut proc_ptr: *mut c_void = std::ptr::null_mut();
         unsafe {
@@ -315,6 +330,12 @@ impl LoadedPlugin {
                 <IAudioProcessor as Interface>::IID.as_ptr() as *const _,
                 &mut proc_ptr,
             );
+        }
+        if proc_ptr.is_null() {
+            return Err(anyhow::anyhow!(
+                "Failed to query IAudioProcessor interface for '{}'",
+                info.name
+            ));
         }
         let audio_processor =
             unsafe { ComPtr::from_raw(proc_ptr as *mut IAudioProcessor).unwrap() };
@@ -325,6 +346,12 @@ impl LoadedPlugin {
                 obj_ptr,
                 <IEditController as Interface>::IID.as_ptr() as *const _,
                 &mut edit_ptr,
+            );
+        }
+        if edit_ptr.is_null() {
+            log::info!(
+                "IEditController not available for '{}' (single-component plugin)",
+                info.name
             );
         }
         let edit_controller = if !edit_ptr.is_null() {
@@ -339,7 +366,10 @@ impl LoadedPlugin {
                 ref_count: AtomicUsize::new(1),
             })) as *mut c_void;
             unsafe {
-                seh_call_set_component_handler(ec.as_ptr() as *mut _, handler);
+                let res = seh_call_set_component_handler(ec.as_ptr() as *mut _, handler);
+                if res != kResultOk {
+                    log::warn!("setComponentHandler returned {} for '{}'", res, info.name);
+                }
             }
             handler
         } else {
@@ -370,39 +400,76 @@ impl LoadedPlugin {
             let p = self.audio_processor.as_ptr() as *mut c_void;
             let c = self.component.as_ptr() as *mut c_void;
 
-            // 1. setIoMode (Realtime)
-            // IComponent::setIoMode index is 6
-            let _ = seh_call_set_io_mode(c, 0); // 0 = kRealtime
+            let res = seh_call_set_io_mode(c, 0);
+            if res != kResultOk {
+                log::warn!("setIoMode returned {} for '{}'", res, self.info.name);
+            }
 
-            // 2. setBusArrangements
-            seh_call_set_bus_arrangements(
+            let res = seh_call_set_bus_arrangements(
                 p,
                 in_arr.as_ptr() as *mut _,
                 self.num_inputs,
                 out_arr.as_ptr() as *mut _,
                 self.num_outputs,
             );
+            if res != kResultOk {
+                log::warn!(
+                    "setBusArrangements returned {} for '{}'",
+                    res,
+                    self.info.name
+                );
+            }
 
-            // 3. activateBus
             for i in 0..self.num_inputs {
-                seh_call_activate_bus(c, MEDIA_TYPE_AUDIO, BUS_DIR_INPUT, i, 1);
+                let res = seh_call_activate_bus(c, MEDIA_TYPE_AUDIO, BUS_DIR_INPUT, i, 1);
+                if res != kResultOk {
+                    log::warn!(
+                        "activateBus(input,{}) returned {} for '{}'",
+                        i,
+                        res,
+                        self.info.name
+                    );
+                }
             }
             for i in 0..self.num_outputs {
-                seh_call_activate_bus(c, MEDIA_TYPE_AUDIO, BUS_DIR_OUTPUT, i, 1);
+                let res = seh_call_activate_bus(c, MEDIA_TYPE_AUDIO, BUS_DIR_OUTPUT, i, 1);
+                if res != kResultOk {
+                    log::warn!(
+                        "activateBus(output,{}) returned {} for '{}'",
+                        i,
+                        res,
+                        self.info.name
+                    );
+                }
             }
 
-            // 4. setupProcessing
             let mut setup = ProcessSetup {
                 processMode: PROCESS_MODE_REALTIME,
                 symbolicSampleSize: SYMBOLIC_SAMPLE_SIZE_32,
                 maxSamplesPerBlock: block_size,
                 sampleRate: sample_rate,
             };
-            seh_call_setup_processing(p, &mut setup as *mut _ as *mut _);
+            let res = seh_call_setup_processing(p, &mut setup as *mut _ as *mut _);
+            if res != kResultOk {
+                return Err(anyhow::anyhow!(
+                    "setupProcessing returned {} for '{}'",
+                    res,
+                    self.info.name
+                ));
+            }
 
-            // 5. setActive & setProcessing
-            seh_call_set_active(c, 1);
-            seh_call_set_processing(p, 1);
+            let res = seh_call_set_active(c, 1);
+            if res != kResultOk {
+                log::warn!("setActive(true) returned {} for '{}'", res, self.info.name);
+            }
+            let res = seh_call_set_processing(p, 1);
+            if res != kResultOk {
+                log::warn!(
+                    "setProcessing(true) returned {} for '{}'",
+                    res,
+                    self.info.name
+                );
+            }
         }
         Ok(())
     }
@@ -471,21 +538,36 @@ impl LoadedPlugin {
         let mut params = Vec::new();
         if let Some(ref ec) = self.edit_controller {
             let count = unsafe { seh_call_get_parameter_count(ec.as_ptr() as *mut _) };
+            if count < 0 {
+                log::error!(
+                    "getParameterCount returned {} for '{}'",
+                    count,
+                    self.info.name
+                );
+                return params;
+            }
             for i in 0..count {
                 let mut info: Vst::ParameterInfo = unsafe { std::mem::zeroed() };
-                if unsafe {
+                let res = unsafe {
                     seh_call_get_parameter_info(
                         ec.as_ptr() as *mut _,
                         i,
                         &mut info as *mut _ as *mut _,
                     )
-                } == kResultOk
-                {
+                };
+                if res == kResultOk {
                     let len = info.title.iter().position(|&c| c == 0).unwrap_or(128);
                     params.push(ParamInfo {
                         id: info.id,
                         name: String::from_utf16_lossy(&info.title[..len]),
                     });
+                } else {
+                    log::warn!(
+                        "getParameterInfo({}) returned {} for '{}'",
+                        i,
+                        res,
+                        self.info.name
+                    );
                 }
             }
         }
@@ -505,8 +587,17 @@ impl LoadedPlugin {
         if let Some(ref ec) = self.edit_controller {
             let info = self.parameter_info();
             if let Some(p) = info.get(index) {
-                unsafe {
-                    seh_call_set_param_normalized(ec.as_ptr() as *mut _, p.id, value as f64);
+                let res = unsafe {
+                    seh_call_set_param_normalized(ec.as_ptr() as *mut _, p.id, value as f64)
+                };
+                if res != kResultOk {
+                    log::warn!(
+                        "setParamNormalized(id={}, val={:.3}) returned {} for '{}'",
+                        p.id,
+                        value,
+                        res,
+                        self.info.name
+                    );
                 }
             }
         }

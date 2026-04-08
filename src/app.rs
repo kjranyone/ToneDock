@@ -883,6 +883,11 @@ impl ToneDockApp {
                                                     format!("Opened editor: {}", name);
                                             }
                                             Err(e) => {
+                                                log::error!(
+                                                    "Failed to open editor for '{}': {}",
+                                                    name,
+                                                    e
+                                                );
                                                 self.status_message =
                                                     format!("Editor error: {}", e);
                                             }

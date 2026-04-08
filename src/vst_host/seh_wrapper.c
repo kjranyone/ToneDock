@@ -29,6 +29,11 @@
  *                            [7] onKeyDown [8] onKeyUp [9] getSize
  *                            [10] onSize [11] onFocus [12] setFrame
  *                            [13] canResize [14] checkSizeConstraint
+ *
+ * g_seh_depth is a thread-local counter incremented on entry to each
+ * SEH-protected wrapper and decremented on exit.  The Rust VEH handler
+ * reads it via seh_get_protected_depth(); when > 0 the VEH suppresses
+ * logging because the SEH frame will catch the exception.
  */
 
 #ifdef __cplusplus
@@ -37,17 +42,23 @@ extern "C" {
 
 #define VST3_API __stdcall
 
+static __declspec(thread) int g_seh_depth = 0;
+
+int seh_get_protected_depth(void) { return g_seh_depth; }
+
 /* ---- FUnknown [0-2] ---- */
 
 long seh_call_query_interface(void* com_obj, const void* iid, void** obj)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, const void*, void**);
     Fn fn = (Fn)vtable[0];
     long result = -1;
     __try { result = fn(com_obj, iid, obj); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
@@ -56,36 +67,42 @@ long seh_call_query_interface(void* com_obj, const void* iid, void** obj)
 long seh_call_count_classes(void* com_obj)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*);
     Fn fn = (Fn)vtable[4];
     long result = -1;
     __try { result = fn(com_obj); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_get_class_info(void* com_obj, int idx, void* info)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, int, void*);
     Fn fn = (Fn)vtable[5];
     long result = -1;
     __try { result = fn(com_obj, idx, info); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_create_instance(void* com_obj, const void* cid, const void* iid, void** obj)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, const void*, const void*, void**);
     Fn fn = (Fn)vtable[6];
     long result = -1;
     __try { result = fn(com_obj, cid, iid, obj); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
@@ -94,24 +111,28 @@ long seh_call_create_instance(void* com_obj, const void* cid, const void* iid, v
 long seh_call_initialize(void* com_obj, void* context)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, void*);
     Fn fn = (Fn)vtable[3];
     long result = -1;
     __try { result = fn(com_obj, context); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_terminate(void* com_obj)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*);
     Fn fn = (Fn)vtable[4];
     long result = -1;
     __try { result = fn(com_obj); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
@@ -120,48 +141,56 @@ long seh_call_terminate(void* com_obj)
 long seh_call_set_io_mode(void* com_obj, int mode)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, int);
     Fn fn = (Fn)vtable[6];
     long result = -1;
     __try { result = fn(com_obj, mode); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_get_bus_count(void* com_obj, int type, int dir)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, int, int);
     Fn fn = (Fn)vtable[7];
     long result = -1;
     __try { result = fn(com_obj, type, dir); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_activate_bus(void* com_obj, int type, int dir, int idx, unsigned char state)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, int, int, int, unsigned char);
     Fn fn = (Fn)vtable[10];
     long result = -1;
     __try { result = fn(com_obj, type, dir, idx, state); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_set_active(void* com_obj, unsigned char state)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, unsigned char);
     Fn fn = (Fn)vtable[11];
     long result = -1;
     __try { result = fn(com_obj, state); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
@@ -170,42 +199,49 @@ long seh_call_set_active(void* com_obj, unsigned char state)
 long seh_call_set_bus_arrangements(void* com_obj, void* inputs, int num_ins, void* outputs, int num_outs)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, void*, int, void*, int);
     Fn fn = (Fn)vtable[3];
     long result = -1;
     __try { result = fn(com_obj, inputs, num_ins, outputs, num_outs); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_setup_processing(void* com_obj, void* setup)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, void*);
     Fn fn = (Fn)vtable[7];
     long result = -1;
     __try { result = fn(com_obj, setup); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_set_processing(void* com_obj, unsigned char state)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, unsigned char);
     Fn fn = (Fn)vtable[8];
     long result = -1;
     __try { result = fn(com_obj, state); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_process_robust(void* com_obj, int num_samples, int num_inputs, void* inputs, int num_outputs, void* outputs, void* context)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
 
     struct {
         int processMode;
@@ -241,6 +277,7 @@ long seh_call_process_robust(void* com_obj, int num_samples, int num_inputs, voi
     long result = -1;
     __try { result = fn(com_obj, &data); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
@@ -249,72 +286,84 @@ long seh_call_process_robust(void* com_obj, int num_samples, int num_inputs, voi
 long seh_call_set_component_handler(void* com_obj, void* handler)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, void*);
     Fn fn = (Fn)vtable[16];
     long result = -1;
     __try { result = fn(com_obj, handler); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_get_parameter_count(void* com_obj)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*);
     Fn fn = (Fn)vtable[8];
     long result = -1;
     __try { result = fn(com_obj); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_get_parameter_info(void* com_obj, int idx, void* info)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, int, void*);
     Fn fn = (Fn)vtable[9];
     long result = -1;
     __try { result = fn(com_obj, idx, info); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 double seh_call_get_param_normalized(void* com_obj, unsigned int id)
 {
     if (!com_obj) return 0.0;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef double (VST3_API *Fn)(void*, unsigned int);
     Fn fn = (Fn)vtable[14];
     double result = 0.0;
     __try { result = fn(com_obj, id); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = 0.0; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_set_param_normalized(void* com_obj, unsigned int id, double value)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, unsigned int, double);
     Fn fn = (Fn)vtable[15];
     long result = -1;
     __try { result = fn(com_obj, id, value); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 void* seh_call_create_view(void* com_obj, const char* name)
 {
     if (!com_obj) return (void*)0;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef void* (VST3_API *Fn)(void*, const char*);
     Fn fn = (Fn)vtable[17];
     void* result = 0;
     __try { result = fn(com_obj, name); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = (void*)-2; }
+    --g_seh_depth;
     return result;
 }
 
@@ -323,60 +372,70 @@ void* seh_call_create_view(void* com_obj, const char* name)
 long seh_call_is_platform_type_supported(void* com_obj, const char* type)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, const char*);
     Fn fn = (Fn)vtable[3];
     long result = -1;
     __try { result = fn(com_obj, type); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_plug_view_attached(void* com_obj, void* parent, const char* type)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, void*, const char*);
     Fn fn = (Fn)vtable[4];
     long result = -1;
     __try { result = fn(com_obj, parent, type); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_plug_view_removed(void* com_obj)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*);
     Fn fn = (Fn)vtable[5];
     long result = -1;
     __try { result = fn(com_obj); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_plug_view_get_size(void* com_obj, void* rect)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, void*);
     Fn fn = (Fn)vtable[9];
     long result = -1;
     __try { result = fn(com_obj, rect); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 
 long seh_call_plug_view_set_frame(void* com_obj, void* frame)
 {
     if (!com_obj) return -1;
+    ++g_seh_depth;
     void** vtable = *(void***)com_obj;
     typedef long (VST3_API *Fn)(void*, void*);
     Fn fn = (Fn)vtable[12];
     long result = -1;
     __try { result = fn(com_obj, frame); }
     __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
     return result;
 }
 

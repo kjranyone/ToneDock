@@ -12,6 +12,12 @@ use windows_sys::Win32::{
     System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS},
 };
 
+#[cfg(target_os = "windows")]
+unsafe extern "C" {
+    #[link_name = "seh_get_protected_depth"]
+    fn seh_get_protected_depth() -> i32;
+}
+
 struct CrashFile(Mutex<File>);
 
 impl std::io::Write for CrashFile {
@@ -124,8 +130,16 @@ unsafe extern "system" fn vecored_exception_handler(
     exception_info: *mut EXCEPTION_POINTERS,
 ) -> i32 {
     if IN_HANDLER.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return 1;
+        return 0;
     }
+
+    unsafe {
+        if seh_get_protected_depth() > 0 {
+            IN_HANDLER.store(false, std::sync::atomic::Ordering::SeqCst);
+            return 0;
+        }
+    }
+
     unsafe {
         if exception_info.is_null() {
             return 1;
@@ -244,5 +258,6 @@ unsafe extern "system" fn vecored_exception_handler(
         }
     }
 
-    1
+    IN_HANDLER.store(false, std::sync::atomic::Ordering::SeqCst);
+    0
 }
