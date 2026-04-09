@@ -34,6 +34,109 @@ pub struct AudioConfigInfo {
     pub default_buffer_size: Option<u32>,
 }
 
+struct InputFifo {
+    channels: Vec<VecDeque<f32>>,
+    max_frames: usize,
+    target_frames: usize,
+}
+
+impl InputFifo {
+    fn new(max_channels: usize, max_frames: usize, target_frames: usize) -> Self {
+        Self {
+            channels: (0..max_channels)
+                .map(|_| VecDeque::with_capacity(max_frames))
+                .collect(),
+            max_frames,
+            target_frames: target_frames.min(max_frames),
+        }
+    }
+
+    fn ensure_channels(&mut self, channels: usize) {
+        if self.channels.len() >= channels {
+            return;
+        }
+        self.channels.extend(
+            (self.channels.len()..channels).map(|_| VecDeque::with_capacity(self.max_frames)),
+        );
+    }
+
+    fn available_frames(&self) -> usize {
+        self.channels.iter().map(VecDeque::len).min().unwrap_or(0)
+    }
+
+    fn trim_to_capacity(&mut self) {
+        let overflow = self.available_frames().saturating_sub(self.max_frames);
+        if overflow == 0 {
+            return;
+        }
+
+        for channel in &mut self.channels {
+            for _ in 0..overflow.min(channel.len()) {
+                let _ = channel.pop_front();
+            }
+        }
+    }
+
+    fn rebalance_for_output(&mut self, requested_frames: usize) {
+        let available = self.available_frames();
+        let keep = self.target_frames.saturating_add(requested_frames);
+        let overflow = available.saturating_sub(keep);
+        if overflow == 0 {
+            return;
+        }
+
+        for channel in &mut self.channels {
+            for _ in 0..overflow.min(channel.len()) {
+                let _ = channel.pop_front();
+            }
+        }
+    }
+
+    fn push_interleaved(&mut self, data: &[f32], channels: usize) {
+        if channels == 0 {
+            return;
+        }
+
+        self.ensure_channels(channels);
+        let frames = data.len() / channels;
+        for frame in 0..frames {
+            for ch in 0..channels {
+                self.channels[ch].push_back(data[frame * channels + ch]);
+            }
+        }
+        self.trim_to_capacity();
+    }
+
+    fn pop_mono_into(&mut self, channel: usize, output: &mut [f32], gain: f32) {
+        output.fill(0.0);
+        if self.channels.is_empty() {
+            return;
+        }
+
+        self.rebalance_for_output(output.len());
+        let frames = self.available_frames().min(output.len());
+        if frames == 0 {
+            return;
+        }
+
+        let src_ch = channel.min(self.channels.len().saturating_sub(1));
+        for frame in 0..frames {
+            if let Some(sample) = self.channels[src_ch].pop_front() {
+                output[frame] = sample * gain;
+            }
+        }
+
+        for (ch, queue) in self.channels.iter_mut().enumerate() {
+            if ch == src_ch {
+                continue;
+            }
+            for _ in 0..frames.min(queue.len()) {
+                let _ = queue.pop_front();
+            }
+        }
+    }
+}
+
 pub struct AudioEngine {
     pub sample_rate: f64,
     pub buffer_size: u32,
@@ -45,7 +148,7 @@ pub struct AudioEngine {
     pub input_gain: Arc<Mutex<f32>>,
     pub output_level: Arc<Mutex<(f32, f32)>>,
     pub input_level: Arc<Mutex<(f32, f32)>>,
-    pub input_channels: (usize, usize),
+    pub input_channel: usize,
     pub output_channels: (usize, usize),
     #[allow(dead_code)]
     pub chain_node_ids: Vec<NodeId>,
@@ -182,6 +285,92 @@ fn find_f32_input_config_range(
         })
 }
 
+fn find_f32_input_config_range_exact(
+    device: &cpal::Device,
+    sample_rate: u32,
+) -> Option<cpal::SupportedStreamConfigRange> {
+    device
+        .supported_input_configs()
+        .ok()
+        .and_then(|mut configs| {
+            configs.find(|c| {
+                c.sample_format() == SampleFormat::F32
+                    && c.min_sample_rate().0 <= sample_rate
+                    && c.max_sample_rate().0 >= sample_rate
+            })
+        })
+}
+
+fn prepare_runtime_graph(staging: &mut AudioGraph, runtime_config: Option<(f64, usize)>) {
+    let Some((sample_rate, max_frames)) = runtime_config else {
+        return;
+    };
+
+    staging.set_sample_rate(sample_rate);
+    staging.set_max_frames(max_frames);
+
+    let looper_ids: Vec<NodeId> = staging
+        .nodes()
+        .iter()
+        .filter_map(|(&id, node)| matches!(node.node_type, NodeType::Looper).then_some(id))
+        .collect();
+
+    for looper_id in looper_ids {
+        staging.init_looper_buffer(looper_id);
+    }
+}
+
+fn transfer_runtime_plugins(
+    current: &AudioGraph,
+    staging: &mut AudioGraph,
+    runtime_config: Option<(f64, usize)>,
+) -> anyhow::Result<()> {
+    if let Some((sample_rate, max_frames)) = runtime_config {
+        for node in current.nodes().values() {
+            let mut plugin_instance = node.plugin_instance.lock();
+            if let Some(ref mut plugin) = *plugin_instance {
+                plugin.setup_processing(sample_rate, max_frames as i32)?;
+            }
+        }
+    }
+
+    for (&id, source_node) in current.nodes() {
+        let Some(target_node) = staging.get_node(id) else {
+            continue;
+        };
+
+        let maybe_plugin = source_node.plugin_instance.lock().take();
+        if let Some(plugin) = maybe_plugin {
+            *target_node.plugin_instance.lock() = Some(plugin);
+        }
+    }
+
+    Ok(())
+}
+
+fn commit_and_publish_graph(
+    graph: &Arc<ArcSwap<AudioGraph>>,
+    mut staging: AudioGraph,
+    runtime_config: Option<(f64, usize)>,
+) -> anyhow::Result<()> {
+    prepare_runtime_graph(&mut staging, runtime_config);
+    staging
+        .commit_topology()
+        .map_err(|e| anyhow::anyhow!("Topology commit failed: {}", e))?;
+
+    let guard = graph.load();
+    transfer_runtime_plugins(&guard, &mut staging, runtime_config)?;
+    drop(guard);
+    graph.store(Arc::new(staging));
+    Ok(())
+}
+
+fn apply_serialized_parameters(plugin: &mut LoadedPlugin, parameters: &[(u32, f32)]) {
+    for (index, value) in parameters {
+        plugin.set_parameter(*index as usize, *value);
+    }
+}
+
 fn config_from_range(
     range: cpal::SupportedStreamConfigRange,
     preferred_sr: u32,
@@ -212,7 +401,10 @@ impl AudioEngine {
         let out_config = config_from_range(output_range, 48000, 256);
         let sample_rate = out_config.sample_rate.0 as f64;
         if sample_rate <= 0.0 {
-            return Err(anyhow::anyhow!("Invalid sample rate from device: {}", sample_rate));
+            return Err(anyhow::anyhow!(
+                "Invalid sample rate from device: {}",
+                sample_rate
+            ));
         }
         let buffer_size = match out_config.buffer_size {
             BufferSize::Fixed(bs) => bs,
@@ -259,7 +451,7 @@ impl AudioEngine {
             input_gain: Arc::new(Mutex::new(1.0)),
             output_level: Arc::new(Mutex::new((0.0, 0.0))),
             input_level: Arc::new(Mutex::new((0.0, 0.0))),
-            input_channels: (0, if in_channels > 1 { 1 } else { 0 }),
+            input_channel: 0.min(in_channels.saturating_sub(1)),
             output_channels: (0, if out_channels > 1 { 1 } else { 0 }),
             stream: None,
             input_stream: None,
@@ -296,9 +488,35 @@ impl AudioEngine {
             .ok_or_else(|| anyhow::anyhow!("No suitable f32 output config"))?;
 
         let out_config = config_from_range(output_range, self.sample_rate as u32, self.buffer_size);
+        let actual_sample_rate = out_config.sample_rate.0 as f64;
+        let actual_buffer_size = match out_config.buffer_size {
+            BufferSize::Fixed(bs) => bs,
+            BufferSize::Default => self.buffer_size,
+        };
         let out_ch_count = out_config.channels as usize;
         if out_ch_count == 0 {
             return Err(anyhow::anyhow!("Output device has 0 channels"));
+        }
+
+        self.sample_rate = actual_sample_rate;
+        self.buffer_size = actual_buffer_size;
+        {
+            let mut met = self.metronome.lock();
+            met.set_sample_rate(actual_sample_rate);
+        }
+        {
+            let mut lpr = self.looper.lock();
+            lpr.set_config(out_ch_count.max(2), actual_sample_rate);
+        }
+        {
+            let guard = self.graph.load();
+            let staging = (**guard).clone();
+            drop(guard);
+            commit_and_publish_graph(
+                &self.graph,
+                staging,
+                Some((actual_sample_rate, actual_buffer_size as usize)),
+            )?;
         }
 
         let cmd_rx = self.command_rx.clone();
@@ -310,12 +528,15 @@ impl AudioEngine {
         let input_gain = self.input_gain.clone();
         let output_level = self.output_level.clone();
         let input_level = self.input_level.clone();
-        let input_ch = self.input_channels;
         let output_ch = self.output_channels;
 
-        let input_buffer: Arc<Mutex<VecDeque<Vec<Vec<f32>>>>> =
-            Arc::new(Mutex::new(VecDeque::new()));
+        let input_buffer = Arc::new(Mutex::new(InputFifo::new(
+            2,
+            (actual_buffer_size as usize).max(64) * 32,
+            (actual_buffer_size as usize).max(64) * 2,
+        )));
         let input_buffer_for_output = input_buffer.clone();
+        let mut effective_input_ch = self.input_channel;
 
         let input_device = self
             .input_device_name
@@ -323,28 +544,21 @@ impl AudioEngine {
             .and_then(|name| Self::find_input_device(&host, name));
 
         if let Some(in_dev) = input_device {
-            if let Some(in_range) = find_f32_input_config_range(&in_dev, self.sample_rate as u32) {
-                let in_cfg = config_from_range(in_range, self.sample_rate as u32, self.buffer_size);
+            if let Some(in_range) =
+                find_f32_input_config_range_exact(&in_dev, actual_sample_rate as u32)
+            {
+                let in_cfg =
+                    config_from_range(in_range, actual_sample_rate as u32, actual_buffer_size);
                 let in_ch_count = in_cfg.channels as usize;
                 if in_ch_count > 0 {
+                    effective_input_ch = self.input_channel.min(in_ch_count.saturating_sub(1));
+                    self.input_channel = effective_input_ch;
                     let buf = input_buffer.clone();
 
                     let in_stream = in_dev.build_input_stream(
                         &in_cfg,
                         move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                            let channels = in_ch_count;
-                            let num_frames = data.len() / channels;
-                            let mut captured = Vec::with_capacity(channels);
-                            for ch in 0..channels {
-                                let ch_data: Vec<f32> =
-                                    (0..num_frames).map(|f| data[f * channels + ch]).collect();
-                                captured.push(ch_data);
-                            }
-                            let mut guard = buf.lock();
-                            guard.push_back(captured);
-                            if guard.len() > 32 {
-                                guard.pop_front();
-                            }
+                            buf.lock().push_interleaved(data, in_ch_count);
                         },
                         |err| log::error!("Input stream error: {}", err),
                         None,
@@ -358,8 +572,15 @@ impl AudioEngine {
                 } else {
                     log::warn!("Input stream has 0 channels, skipping");
                 }
+            } else {
+                log::warn!(
+                    "Input device does not support {} Hz f32; input stream disabled to avoid rate mismatch",
+                    actual_sample_rate as u32
+                );
             }
         }
+
+        let input_ch = effective_input_ch;
 
         let out_stream = output_device.build_output_stream(
             &out_config,
@@ -371,13 +592,9 @@ impl AudioEngine {
 
                 let mut input_mono = vec![0.0f32; num_frames];
                 {
-                    let mut guard = input_buffer_for_output.lock();
-                    if let Some(captured) = guard.pop_front() {
-                        let src_ch = input_ch.0.min(captured.len().saturating_sub(1));
-                        for frame in 0..num_frames.min(captured[src_ch].len()) {
-                            input_mono[frame] = captured[src_ch][frame] * gain;
-                        }
-                    }
+                    input_buffer_for_output
+                        .lock()
+                        .pop_mono_into(input_ch, &mut input_mono, gain);
                 }
 
                 {
@@ -397,14 +614,13 @@ impl AudioEngine {
                     if !pending.is_empty() {
                         let guard = graph.load();
                         let mut staging = (**guard).clone();
+                        drop(guard);
                         for cmd in pending {
                             apply_command(&mut staging, cmd);
                         }
-                        drop(guard);
-                        if let Err(e) = staging.commit_topology() {
+                        if let Err(e) = commit_and_publish_graph(&graph, staging, None) {
                             log::error!("Topology commit in audio thread failed: {}", e);
                         }
-                        graph.store(Arc::new(staging));
                     }
                 }
 
@@ -498,10 +714,9 @@ impl AudioEngine {
             for cmd in pending {
                 apply_command(&mut staging, cmd);
             }
-            if let Err(e) = staging.commit_topology() {
+            if let Err(e) = commit_and_publish_graph(&self.graph, staging, None) {
                 log::error!("Topology commit in staging failed: {}", e);
             }
-            self.graph.store(Arc::new(staging));
         }
     }
 
@@ -513,6 +728,14 @@ impl AudioEngine {
         self.host_id
     }
 
+    pub fn current_input_device_name(&self) -> Option<&str> {
+        self.input_device_name.as_deref()
+    }
+
+    pub fn current_output_device_name(&self) -> Option<&str> {
+        self.output_device_name.as_deref()
+    }
+
     pub fn restart_with_config(
         &mut self,
         host_id: Option<HostId>,
@@ -520,7 +743,7 @@ impl AudioEngine {
         output_name: Option<&str>,
         sample_rate: u32,
         buffer_size: u32,
-        input_ch: (usize, usize),
+        input_ch: usize,
         output_ch: (usize, usize),
     ) -> anyhow::Result<()> {
         self.stop();
@@ -530,7 +753,7 @@ impl AudioEngine {
         self.output_device_name = output_name.map(String::from);
         self.sample_rate = sample_rate as f64;
         self.buffer_size = buffer_size;
-        self.input_channels = input_ch;
+        self.input_channel = input_ch;
         self.output_channels = output_ch;
 
         self.start()
@@ -681,6 +904,30 @@ impl AudioEngine {
         })
     }
 
+    pub fn get_supported_output_config_for_io(
+        host_id: Option<HostId>,
+        output_device_name: &str,
+        input_device_name: Option<&str>,
+    ) -> Option<AudioConfigInfo> {
+        let mut cfg = Self::get_supported_config(host_id, output_device_name, false)?;
+        let Some(input_device_name) = input_device_name else {
+            return Some(cfg);
+        };
+
+        let input_cfg = Self::get_supported_config(host_id, input_device_name, true)?;
+        cfg.sample_rates
+            .retain(|sr| input_cfg.sample_rates.iter().any(|input_sr| input_sr == sr));
+
+        if !cfg
+            .sample_rates
+            .contains(&cfg.default_sample_rate.unwrap_or_default())
+        {
+            cfg.default_sample_rate = cfg.sample_rates.last().copied();
+        }
+
+        Some(cfg)
+    }
+
     pub fn get_device_channels(
         host_id: Option<HostId>,
         device_name: &str,
@@ -784,7 +1031,10 @@ impl AudioEngine {
                 let mut staging = (**guard).clone();
                 drop(guard);
                 staging.init_looper_buffer(id);
-                self.graph.store(Arc::new(staging));
+                if let Err(e) = commit_and_publish_graph(&self.graph, staging, None) {
+                    log::error!("Failed to initialize looper buffer: {}", e);
+                    return NodeId(0);
+                }
             }
             self.looper_node_id = Some(id);
             return id;
@@ -802,54 +1052,171 @@ impl AudioEngine {
         None
     }
 
-    pub fn load_serialized_graph(&self, data: &SerializedGraph) {
+    pub fn snapshot_serialized_graph(&self) -> SerializedGraph {
         let guard = self.graph.load();
-        let mut new_graph = AudioGraph::new(guard.sample_rate(), guard.max_frames());
-        drop(guard);
+        let mut node_ids: Vec<NodeId> = guard.nodes().keys().copied().collect();
+        node_ids.sort();
 
-        let mut id_map: std::collections::HashMap<NodeId, NodeId> =
-            std::collections::HashMap::new();
+        let mut nodes = Vec::with_capacity(node_ids.len());
+        for node_id in node_ids {
+            let Some(node) = guard.get_node(node_id) else {
+                continue;
+            };
+
+            let (parameters, plugin_state) = if matches!(node.node_type, NodeType::VstPlugin { .. })
+            {
+                let plugin_instance = node.plugin_instance.lock();
+                if let Some(ref plugin) = *plugin_instance {
+                    let parameters = plugin
+                        .parameter_info()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| (index as u32, plugin.get_parameter(index)))
+                        .collect();
+                    (parameters, plugin.save_state())
+                } else {
+                    (Vec::new(), None)
+                }
+            } else {
+                (Vec::new(), None)
+            };
+
+            nodes.push(crate::audio::node::SerializedNode {
+                id: node_id,
+                node_type: node.node_type.clone(),
+                enabled: node.enabled,
+                bypassed: node.bypassed,
+                position: node.position,
+                parameters,
+                plugin_state,
+                internal_state: node.internal_state.clone(),
+            });
+        }
+
+        let mut connections = guard.connections().to_vec();
+        connections.sort_by_key(|conn| {
+            (
+                conn.source_node.0,
+                conn.source_port.0,
+                conn.target_node.0,
+                conn.target_port.0,
+            )
+        });
+
+        SerializedGraph { nodes, connections }
+    }
+
+    fn instantiate_serialized_plugin(
+        &self,
+        info: &PluginInfo,
+        plugin_state: Option<&[u8]>,
+        parameters: &[(u32, f32)],
+    ) -> anyhow::Result<LoadedPlugin> {
+        let mut plugin = LoadedPlugin::load(info)?;
+        plugin.setup_processing(self.sample_rate, self.buffer_size as i32)?;
+
+        let restored_from_state = if let Some(state) = plugin_state {
+            match plugin.restore_state(state) {
+                Ok(()) => true,
+                Err(err) => {
+                    log::warn!(
+                        "Failed to restore saved state for '{}' from '{}': {}",
+                        info.name,
+                        info.path.display(),
+                        err
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if !restored_from_state {
+            apply_serialized_parameters(&mut plugin, parameters);
+        }
+
+        Ok(plugin)
+    }
+
+    pub fn load_serialized_graph(&mut self, data: &SerializedGraph) -> anyhow::Result<()> {
+        let mut new_graph = AudioGraph::new(self.sample_rate, self.buffer_size as usize);
 
         for sn in &data.nodes {
-            let new_id = match new_graph.add_node(sn.node_type.clone()) {
-                Ok(id) => id,
-                Err(_) => continue,
-            };
-            id_map.insert(sn.id, new_id);
+            new_graph
+                .add_node_with_id(sn.id, sn.node_type.clone())
+                .map_err(|err| anyhow::anyhow!("Failed to add node {:?}: {}", sn.id, err))?;
 
-            new_graph.set_node_enabled(new_id, sn.enabled);
-            new_graph.set_node_bypassed(new_id, sn.bypassed);
-            new_graph.set_node_position(new_id, sn.position.0, sn.position.1);
+            new_graph.set_node_enabled(sn.id, sn.enabled);
+            new_graph.set_node_bypassed(sn.id, sn.bypassed);
+            new_graph.set_node_position(sn.id, sn.position.0, sn.position.1);
             if !matches!(sn.internal_state, NodeInternalState::None) {
-                new_graph.set_node_internal_state(new_id, sn.internal_state.clone());
+                new_graph.set_node_internal_state(sn.id, sn.internal_state.clone());
             }
         }
 
         for conn in &data.connections {
-            let Some(&src) = id_map.get(&conn.source_node) else {
-                continue;
-            };
-            let Some(&tgt) = id_map.get(&conn.target_node) else {
-                continue;
-            };
-            let _ = new_graph.connect(Connection {
-                source_node: src,
-                source_port: conn.source_port,
-                target_node: tgt,
-                target_port: conn.target_port,
-            });
+            new_graph
+                .connect(conn.clone())
+                .map_err(|err| anyhow::anyhow!("Failed to connect {:?}: {}", conn, err))?;
         }
 
-        if let Err(e) = new_graph.commit_topology() {
-            log::error!("Failed to commit topology in load_serialized_graph: {}", e);
+        prepare_runtime_graph(
+            &mut new_graph,
+            Some((self.sample_rate, self.buffer_size as usize)),
+        );
+        new_graph
+            .commit_topology()
+            .map_err(|err| anyhow::anyhow!("Topology commit failed: {}", err))?;
+
+        for sn in &data.nodes {
+            let NodeType::VstPlugin {
+                plugin_path,
+                plugin_name,
+            } = &sn.node_type
+            else {
+                continue;
+            };
+
+            let info = PluginInfo {
+                path: std::path::PathBuf::from(plugin_path),
+                name: plugin_name.clone(),
+                category: String::new(),
+                vendor: String::new(),
+            };
+
+            match self.instantiate_serialized_plugin(
+                &info,
+                sn.plugin_state.as_deref(),
+                &sn.parameters,
+            ) {
+                Ok(plugin) => {
+                    if let Some(node) = new_graph.get_node(sn.id) {
+                        *node.plugin_instance.lock() = Some(plugin);
+                    }
+                }
+                Err(err) => {
+                    log::error!(
+                        "Failed to restore VST '{}' from '{}': {}",
+                        plugin_name,
+                        plugin_path,
+                        err
+                    );
+                }
+            }
         }
 
+        let metronome_node_id = Self::find_node_id_in_graph(&new_graph, NodeType::Metronome);
+        let looper_node_id = Self::find_node_id_in_graph(&new_graph, NodeType::Looper);
+        self.metronome_node_id = metronome_node_id;
+        self.looper_node_id = looper_node_id;
         self.graph.store(Arc::new(new_graph));
         log::info!(
             "Loaded serialized graph: {} nodes, {} connections",
             data.nodes.len(),
             data.connections.len()
         );
+        Ok(())
     }
 
     pub fn load_vst_plugin_to_node(
@@ -857,43 +1224,38 @@ impl AudioEngine {
         node_id: NodeId,
         info: &PluginInfo,
     ) -> anyhow::Result<()> {
-        let sr = self.sample_rate;
-        let bs = self.buffer_size as i32;
-
-        let mut plugin = LoadedPlugin::load(info)?;
-        plugin.setup_processing(sr, bs)?;
+        let plugin = self.instantiate_serialized_plugin(info, None, &[])?;
 
         {
             let guard = self.graph.load();
-            let staging = (**guard).clone();
-            drop(guard);
-
-            if let Some(node) = staging.get_node(node_id) {
+            if let Some(node) = guard.get_node(node_id) {
                 *node.plugin_instance.lock() = Some(plugin);
             } else {
                 return Err(anyhow::anyhow!("Node {:?} not found in graph", node_id));
             }
-
-            self.graph.store(Arc::new(staging));
         }
 
         log::info!("VST plugin '{}' loaded into node {:?}", info.name, node_id);
         Ok(())
     }
 
+    fn find_node_id_in_graph(graph: &AudioGraph, target: NodeType) -> Option<NodeId> {
+        for (&id, node) in graph.nodes() {
+            if std::mem::discriminant(&node.node_type) == std::mem::discriminant(&target) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
     pub fn set_vst_node_parameter(&self, node_id: NodeId, param_index: usize, value: f32) {
         let guard = self.graph.load();
-        let staging = (**guard).clone();
-        drop(guard);
-
-        if let Some(node) = staging.get_node(node_id) {
+        if let Some(node) = guard.get_node(node_id) {
             let mut plugin_instance = node.plugin_instance.lock();
             if let Some(ref mut plugin) = *plugin_instance {
                 plugin.set_parameter(param_index, value);
             }
         }
-
-        self.graph.store(Arc::new(staging));
     }
 
     pub fn get_vst_node_parameters(&self, node_id: NodeId) -> Vec<crate::audio::chain::ParamInfo> {
@@ -975,10 +1337,9 @@ impl AudioEngine {
             }
         }
 
-        if let Err(e) = staging.commit_topology() {
+        if let Err(e) = commit_and_publish_graph(&self.graph, staging, None) {
             log::error!("Undo commit_topology failed: {}", e);
         }
-        self.graph.store(Arc::new(staging));
     }
 
     pub fn execute_redo_actions(&self, actions: &[crate::undo::UndoAction]) {
@@ -1028,9 +1389,48 @@ impl AudioEngine {
             }
         }
 
-        if let Err(e) = staging.commit_topology() {
+        if let Err(e) = commit_and_publish_graph(&self.graph, staging, None) {
             log::error!("Redo commit_topology failed: {}", e);
         }
-        self.graph.store(Arc::new(staging));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InputFifo;
+
+    #[test]
+    fn input_fifo_reblocks_input_for_output() {
+        let mut fifo = InputFifo::new(2, 32, 4);
+
+        fifo.push_interleaved(&[1.0, 10.0, 2.0, 20.0], 2);
+        fifo.push_interleaved(&[3.0, 30.0, 4.0, 40.0], 2);
+
+        let mut output = vec![0.0f32; 4];
+        fifo.pop_mono_into(0, &mut output, 1.0);
+
+        assert_eq!(output, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn input_fifo_keeps_channels_aligned_when_trimming() {
+        let mut fifo = InputFifo::new(2, 3, 1);
+        fifo.push_interleaved(&[1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0], 2);
+
+        let mut output = vec![0.0f32; 3];
+        fifo.pop_mono_into(1, &mut output, 1.0);
+
+        assert_eq!(output, vec![20.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn input_fifo_rebalances_latency_before_output() {
+        let mut fifo = InputFifo::new(1, 16, 2);
+        fifo.push_interleaved(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 1);
+
+        let mut output = vec![0.0f32; 2];
+        fifo.pop_mono_into(0, &mut output, 1.0);
+
+        assert_eq!(output, vec![3.0, 4.0]);
     }
 }

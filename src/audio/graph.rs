@@ -439,12 +439,7 @@ impl AudioGraph {
             .collect();
 
         if !existing.is_empty() {
-            if existing
-                .iter()
-                .any(|c| c.source_node == conn.source_node && c.source_port == conn.source_port)
-            {
-                return Err(GraphError::AlreadyConnected);
-            }
+            return Err(GraphError::AlreadyConnected);
         }
 
         let source_ch = source_port.channels;
@@ -1327,14 +1322,6 @@ impl AudioGraph {
         }
     }
 
-    pub fn sample_rate(&self) -> f64 {
-        self.sample_rate
-    }
-
-    pub fn max_frames(&self) -> usize {
-        self.max_frames
-    }
-
     pub fn looper_loop_length(&self, node_id: NodeId) -> usize {
         let node = match self.nodes.get(&node_id) {
             Some(n) => n,
@@ -1949,6 +1936,55 @@ mod tests {
         graph.connect(conn.clone()).unwrap();
         let result = graph.connect(conn);
         assert!(matches!(result, Err(GraphError::AlreadyConnected)));
+    }
+
+    #[test]
+    fn test_reject_second_source_to_same_input_port() {
+        let mut graph = AudioGraph::new(48000.0, 256);
+        let input_id = graph.add_node(NodeType::AudioInput).unwrap();
+        let split_id = graph.add_node(NodeType::Splitter { outputs: 2 }).unwrap();
+        let gain_id = graph.add_node(NodeType::Gain).unwrap();
+
+        graph
+            .connect(Connection {
+                source_node: input_id,
+                source_port: PortId(0),
+                target_node: split_id,
+                target_port: PortId(0),
+            })
+            .unwrap();
+        graph
+            .connect(Connection {
+                source_node: split_id,
+                source_port: PortId(0),
+                target_node: gain_id,
+                target_port: PortId(0),
+            })
+            .unwrap();
+
+        let result = graph.connect(Connection {
+            source_node: split_id,
+            source_port: PortId(1),
+            target_node: gain_id,
+            target_port: PortId(0),
+        });
+
+        assert!(matches!(result, Err(GraphError::AlreadyConnected)));
+    }
+
+    #[test]
+    fn test_vst_plugin_node_is_mono_in_stereo_out() {
+        let node = GraphNode::new(
+            NodeId(1),
+            NodeType::VstPlugin {
+                plugin_path: "test.vst3".into(),
+                plugin_name: "Test".into(),
+            },
+            256,
+        );
+
+        assert_eq!(node.input_ports[0].channels.channel_count(), 1);
+        assert_eq!(node.output_ports[0].channels.channel_count(), 2);
     }
 
     #[test]

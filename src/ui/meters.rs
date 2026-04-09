@@ -1,25 +1,32 @@
 use egui::*;
 
-pub fn draw_stereo_meter(ui: &mut Ui, label: &str, left: f32, right: f32, width: f32, height: f32) {
+fn draw_meter_bars(ui: &mut Ui, label: &str, levels: &[f32], width: f32, height: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
 
     let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::same(12), crate::ui::theme::BG_PANEL);
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(12),
+        Stroke::new(1.0, crate::ui::theme::OUTLINE_VAR),
+        StrokeKind::Inside,
+    );
 
     painter.text(
-        Pos2::new(rect.left(), rect.top()),
+        Pos2::new(rect.left() + 10.0, rect.top() + 8.0),
         Align2::LEFT_TOP,
         label,
         FontId::proportional(10.0),
         crate::ui::theme::TEXT_SECONDARY,
     );
 
-    let meter_y = rect.top() + 14.0;
-    let meter_h = (height - 20.0) / 2.0;
+    let meter_y = rect.top() + 24.0;
+    let meter_h = (height - 30.0) / levels.len() as f32;
     let meter_w = width - 20.0;
     let meter_x = rect.left() + 10.0;
 
-    for (i, level) in [left, right].iter().enumerate() {
-        let y = meter_y + i as f32 * (meter_h + 2.0);
+    for (i, level) in levels.iter().enumerate() {
+        let y = meter_y + i as f32 * meter_h;
 
         painter.rect_filled(
             Rect::from_min_max(
@@ -58,4 +65,12 @@ pub fn draw_stereo_meter(ui: &mut Ui, label: &str, left: f32, right: f32, width:
             );
         }
     }
+}
+
+pub fn draw_mono_meter(ui: &mut Ui, label: &str, level: f32, width: f32, height: f32) {
+    draw_meter_bars(ui, label, &[level], width, height);
+}
+
+pub fn draw_stereo_meter(ui: &mut Ui, label: &str, left: f32, right: f32, width: f32, height: f32) {
+    draw_meter_bars(ui, label, &[left, right], width, height);
 }

@@ -232,6 +232,20 @@ long seh_call_component_get_state(void* com_obj, void* state)
     return result;
 }
 
+long seh_call_component_set_state(void* com_obj, void* state)
+{
+    if (!com_obj) return -1;
+    ++g_seh_depth;
+    void** vtable = *(void***)com_obj;
+    typedef long (VST3_API *Fn)(void*, void*);
+    Fn fn = (Fn)vtable[12];
+    long result = -1;
+    __try { result = fn(com_obj, state); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { result = -2; }
+    --g_seh_depth;
+    return result;
+}
+
 /* ---- IAudioProcessor (base: FUnknown[0-2]) [3-10] ---- */
 
 long seh_call_set_bus_arrangements(void* com_obj, void* inputs, int num_ins, void* outputs, int num_outs)

@@ -102,6 +102,15 @@ impl Looper {
         self.num_channels
     }
 
+    pub fn set_config(&mut self, channels: usize, sample_rate: f64) {
+        self.num_channels = channels;
+        self.buffer = Arc::new(Mutex::new(LooperBuffer::new(channels, sample_rate, 120.0)));
+        *self.playback_pos.lock() = 0;
+        self.recording = false;
+        self.playing = false;
+        self.overdubbing = false;
+    }
+
     pub fn toggle_record(&mut self) {
         if self.recording {
             self.recording = false;

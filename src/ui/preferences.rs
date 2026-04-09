@@ -1,6 +1,6 @@
 use egui::*;
 
-use crate::audio::engine::{enumerate_hosts, AudioConfigInfo, AudioDeviceInfo, AudioHostInfo};
+use crate::audio::engine::{AudioConfigInfo, AudioDeviceInfo, AudioHostInfo, enumerate_hosts};
 use crate::vst_host::scanner::PluginInfo;
 
 pub enum PreferencesTab {
@@ -29,8 +29,7 @@ pub struct AudioSettingsState {
     pub input_channel_count: u16,
     pub output_ch_l: usize,
     pub output_ch_r: usize,
-    pub input_ch_l: usize,
-    pub input_ch_r: usize,
+    pub input_ch: usize,
     output_changed: bool,
     input_changed: bool,
     host_changed: bool,
@@ -41,7 +40,7 @@ impl AudioSettingsState {
         current_host: Option<cpal::HostId>,
         current_sr: u32,
         current_bs: u32,
-        current_input_ch: (usize, usize),
+        current_input_ch: usize,
         current_output_ch: (usize, usize),
     ) -> Self {
         let hosts = enumerate_hosts();
@@ -53,8 +52,13 @@ impl AudioSettingsState {
         let default_output_idx = outputs.iter().position(|d| d.is_default);
 
         let output_name = default_output_idx.map(|i| outputs[i].name.as_str());
+        let input_name = default_input_idx.map(|i| inputs[i].name.as_str());
         let config_info = output_name.and_then(|n| {
-            crate::audio::engine::AudioEngine::get_supported_config(selected_host, n, false)
+            crate::audio::engine::AudioEngine::get_supported_output_config_for_io(
+                selected_host,
+                n,
+                input_name,
+            )
         });
 
         let output_channel_count = default_output_idx
@@ -91,8 +95,7 @@ impl AudioSettingsState {
             input_channel_count,
             output_ch_l: current_output_ch.0.min(output_channel_count as usize - 1),
             output_ch_r: current_output_ch.1.min(output_channel_count as usize - 1),
-            input_ch_l: current_input_ch.0.min(input_channel_count as usize - 1),
-            input_ch_r: current_input_ch.1.min(input_channel_count as usize - 1),
+            input_ch: current_input_ch.min(input_channel_count as usize - 1),
             output_changed: false,
             input_changed: false,
             host_changed: false,
@@ -141,8 +144,7 @@ impl AudioSettingsState {
                 )
             })
             .unwrap_or(2);
-        self.input_ch_l = self.input_ch_l.min(self.input_channel_count as usize - 1);
-        self.input_ch_r = self.input_ch_r.min(self.input_channel_count as usize - 1);
+        self.input_ch = self.input_ch.min(self.input_channel_count as usize - 1);
     }
 
     fn refresh_config(&mut self) {
@@ -150,8 +152,16 @@ impl AudioSettingsState {
             .selected_output
             .and_then(|i| self.output_devices.get(i))
             .map(|d| d.name.clone());
+        let input_name = self
+            .selected_input
+            .and_then(|i| self.input_devices.get(i))
+            .map(|d| d.name.clone());
         self.config_info = output_name.as_deref().and_then(|n| {
-            crate::audio::engine::AudioEngine::get_supported_config(self.selected_host, n, false)
+            crate::audio::engine::AudioEngine::get_supported_output_config_for_io(
+                self.selected_host,
+                n,
+                input_name.as_deref(),
+            )
         });
 
         let is_asio = self.is_asio();
@@ -199,7 +209,7 @@ pub enum PreferencesResult {
         output_name: Option<String>,
         sample_rate: u32,
         buffer_size: u32,
-        input_ch: (usize, usize),
+        input_ch: usize,
         output_ch: (usize, usize),
     },
     AudioCancel,
@@ -213,7 +223,7 @@ impl PreferencesState {
         current_sr: u32,
         current_bs: u32,
         custom_plugin_paths: Vec<std::path::PathBuf>,
-        current_input_ch: (usize, usize),
+        current_input_ch: usize,
         current_output_ch: (usize, usize),
     ) -> Self {
         Self {
@@ -236,6 +246,22 @@ const SZ_BODY: f32 = 13.0;
 const SZ_SMALL: f32 = 11.0;
 const SZ_PATH: f32 = 12.0;
 
+fn preferences_window_frame() -> Frame {
+    Frame::new()
+        .fill(crate::ui::theme::SURFACE_CONTAINER_HIGH)
+        .stroke(Stroke::new(1.0, crate::ui::theme::OUTLINE_VAR))
+        .corner_radius(CornerRadius::same(18))
+        .inner_margin(Margin::symmetric(14, 12))
+}
+
+fn preferences_panel_frame() -> Frame {
+    Frame::new()
+        .fill(crate::ui::theme::BG_PANEL)
+        .stroke(Stroke::new(1.0, crate::ui::theme::OUTLINE_VAR))
+        .corner_radius(CornerRadius::same(14))
+        .inner_margin(Margin::symmetric(14, 12))
+}
+
 pub fn show_preferences(
     ctx: &Context,
     state: &mut PreferencesState,
@@ -249,33 +275,36 @@ pub fn show_preferences(
         .collapsible(false)
         .default_size([560.0, 560.0])
         .min_size([440.0, 380.0])
+        .frame(preferences_window_frame())
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let audio_selected = matches!(state.tab, PreferencesTab::Audio);
-                let plugins_selected = matches!(state.tab, PreferencesTab::Plugins);
+            preferences_panel_frame().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let audio_selected = matches!(state.tab, PreferencesTab::Audio);
+                    let plugins_selected = matches!(state.tab, PreferencesTab::Plugins);
 
-                if ui.selectable_label(audio_selected, "Audio").clicked() {
-                    state.tab = PreferencesTab::Audio;
-                }
-                if ui
-                    .selectable_label(plugins_selected, "Plugins (VST)")
-                    .clicked()
-                {
-                    state.tab = PreferencesTab::Plugins;
+                    if ui.selectable_label(audio_selected, "Audio").clicked() {
+                        state.tab = PreferencesTab::Audio;
+                    }
+                    if ui
+                        .selectable_label(plugins_selected, "Plugins (VST)")
+                        .clicked()
+                    {
+                        state.tab = PreferencesTab::Plugins;
+                    }
+                });
+
+                ui.separator();
+                ui.add_space(4.0);
+
+                match state.tab {
+                    PreferencesTab::Audio => {
+                        result = show_audio_tab(ui, &mut state.audio);
+                    }
+                    PreferencesTab::Plugins => {
+                        result = show_plugins_tab(ui, state, available_plugins);
+                    }
                 }
             });
-
-            ui.separator();
-            ui.add_space(4.0);
-
-            match state.tab {
-                PreferencesTab::Audio => {
-                    result = show_audio_tab(ui, &mut state.audio);
-                }
-                PreferencesTab::Plugins => {
-                    result = show_plugins_tab(ui, state, available_plugins);
-                }
-            }
         });
 
     result
@@ -468,23 +497,13 @@ fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> PreferencesRes
             );
         });
         ui.horizontal(|ui| {
-            ui.label("Left ch:");
-            let mut ch_l = state.input_ch_l as u32;
-            egui::DragValue::new(&mut ch_l)
+            ui.label("Input ch:");
+            let mut input_ch = state.input_ch as u32;
+            egui::DragValue::new(&mut input_ch)
                 .range(0..=state.input_channel_count as u32 - 1)
                 .speed(0.1)
                 .ui(ui);
-            state.input_ch_l = ch_l as usize;
-
-            ui.add_space(8.0);
-
-            ui.label("Right ch:");
-            let mut ch_r = state.input_ch_r as u32;
-            egui::DragValue::new(&mut ch_r)
-                .range(0..=state.input_channel_count as u32 - 1)
-                .speed(0.1)
-                .ui(ui);
-            state.input_ch_r = ch_r as usize;
+            state.input_ch = input_ch as usize;
         });
     }
 
@@ -603,7 +622,7 @@ fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> PreferencesRes
                     output_name,
                     sample_rate: state.sample_rate,
                     buffer_size: state.buffer_size,
-                    input_ch: (state.input_ch_l, state.input_ch_r),
+                    input_ch: state.input_ch,
                     output_ch: (state.output_ch_l, state.output_ch_r),
                 };
             }

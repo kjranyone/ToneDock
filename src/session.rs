@@ -8,9 +8,17 @@ pub struct Session {
     pub sample_rate: f64,
     pub buffer_size: u32,
     #[serde(default)]
+    pub preset: Preset,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain: Vec<ChainSlot>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<SerializedGraph>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Preset {
+    pub name: String,
+    pub graph: SerializedGraph,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,15 +29,39 @@ pub struct ChainSlot {
     pub parameters: Vec<(usize, f32)>,
 }
 
+impl Default for Preset {
+    fn default() -> Self {
+        Self {
+            name: "Untitled".into(),
+            graph: SerializedGraph::default(),
+        }
+    }
+}
+
 impl Default for Session {
     fn default() -> Self {
         Self {
             name: "Untitled".into(),
             sample_rate: 48000.0,
             buffer_size: 256,
+            preset: Preset::default(),
             chain: Vec::new(),
             graph: None,
         }
+    }
+}
+
+impl Preset {
+    pub fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    pub fn load_from_file(path: &std::path::Path) -> anyhow::Result<Self> {
+        let json = std::fs::read_to_string(path)?;
+        let preset: Preset = serde_json::from_str(&json)?;
+        Ok(preset)
     }
 }
 
@@ -43,14 +75,41 @@ impl Session {
     pub fn load_from_file(path: &std::path::Path) -> anyhow::Result<Self> {
         let json = std::fs::read_to_string(path)?;
         let mut session: Session = serde_json::from_str(&json)?;
-        if session.graph.is_none() && !session.chain.is_empty() {
-            session.graph = Some(Self::migrate_legacy_session(&session.chain));
-            log::info!(
-                "Migrated {} legacy chain slots to graph format",
-                session.chain.len()
-            );
-        }
+        session.promote_preset();
         Ok(session)
+    }
+
+    fn promote_preset(&mut self) {
+        let has_preset_graph =
+            !self.preset.graph.nodes.is_empty() || !self.preset.graph.connections.is_empty();
+
+        if !has_preset_graph {
+            if let Some(graph) = self.graph.take() {
+                self.preset = Preset {
+                    name: self.name.clone(),
+                    graph,
+                };
+            } else if !self.chain.is_empty() {
+                self.preset = Preset {
+                    name: self.name.clone(),
+                    graph: Self::migrate_legacy_session(&self.chain),
+                };
+                log::info!(
+                    "Migrated {} legacy chain slots to preset graph format",
+                    self.chain.len()
+                );
+            }
+        }
+
+        if self.preset.name.is_empty() {
+            self.preset.name = self.name.clone();
+        }
+        if self.name.is_empty() {
+            self.name = self.preset.name.clone();
+        }
+
+        self.graph = None;
+        self.chain.clear();
     }
 
     fn migrate_legacy_session(chain: &[ChainSlot]) -> SerializedGraph {
@@ -65,6 +124,7 @@ impl Session {
             bypassed: false,
             position: (0.0, 0.0),
             parameters: Vec::new(),
+            plugin_state: None,
             internal_state: crate::audio::node::NodeInternalState::None,
         });
 
@@ -76,6 +136,7 @@ impl Session {
             bypassed: false,
             position: (0.0, 0.0),
             parameters: Vec::new(),
+            plugin_state: None,
             internal_state: crate::audio::node::NodeInternalState::None,
         });
 
@@ -100,6 +161,7 @@ impl Session {
                     .iter()
                     .map(|(idx, val)| (*idx as u32, *val))
                     .collect(),
+                plugin_state: None,
                 internal_state: crate::audio::node::NodeInternalState::None,
             });
 
@@ -131,8 +193,10 @@ mod tests {
     use crate::audio::node::{Connection, NodeId, NodeType, PortId};
 
     #[test]
-    fn test_session_default_has_no_graph() {
+    fn test_session_default_has_empty_preset() {
         let s = Session::default();
+        assert!(s.preset.graph.nodes.is_empty());
+        assert!(s.preset.graph.connections.is_empty());
         assert!(s.graph.is_none());
         assert!(s.chain.is_empty());
     }
@@ -141,48 +205,56 @@ mod tests {
     fn test_session_roundtrip() {
         let mut session = Session::default();
         session.name = "test_session".into();
-        session.graph = Some(SerializedGraph {
-            nodes: vec![
-                SerializedNode {
-                    id: NodeId(1),
-                    node_type: NodeType::AudioInput,
-                    enabled: true,
-                    bypassed: false,
-                    position: (0.0, 0.0),
-                    ..Default::default()
-                },
-                SerializedNode {
-                    id: NodeId(2),
-                    node_type: NodeType::Gain,
-                    enabled: true,
-                    bypassed: false,
-                    position: (200.0, 0.0),
-                    ..Default::default()
-                },
-                SerializedNode {
-                    id: NodeId(3),
-                    node_type: NodeType::AudioOutput,
-                    enabled: true,
-                    bypassed: false,
-                    position: (400.0, 0.0),
-                    ..Default::default()
-                },
-            ],
-            connections: vec![
-                Connection {
-                    source_node: NodeId(1),
-                    source_port: PortId(0),
-                    target_node: NodeId(2),
-                    target_port: PortId(0),
-                },
-                Connection {
-                    source_node: NodeId(2),
-                    source_port: PortId(0),
-                    target_node: NodeId(3),
-                    target_port: PortId(0),
-                },
-            ],
-        });
+        session.preset = Preset {
+            name: "test_preset".into(),
+            graph: SerializedGraph {
+                nodes: vec![
+                    SerializedNode {
+                        id: NodeId(1),
+                        node_type: NodeType::AudioInput,
+                        enabled: true,
+                        bypassed: false,
+                        position: (0.0, 0.0),
+                        ..Default::default()
+                    },
+                    SerializedNode {
+                        id: NodeId(2),
+                        node_type: NodeType::VstPlugin {
+                            plugin_path: "C:/Plugins/Test.vst3".into(),
+                            plugin_name: "Test".into(),
+                        },
+                        enabled: true,
+                        bypassed: false,
+                        position: (200.0, 0.0),
+                        parameters: vec![(0, 0.25), (1, 0.75)],
+                        plugin_state: Some(vec![1, 2, 3, 4]),
+                        internal_state: Default::default(),
+                    },
+                    SerializedNode {
+                        id: NodeId(3),
+                        node_type: NodeType::AudioOutput,
+                        enabled: true,
+                        bypassed: false,
+                        position: (400.0, 0.0),
+                        ..Default::default()
+                    },
+                ],
+                connections: vec![
+                    Connection {
+                        source_node: NodeId(1),
+                        source_port: PortId(0),
+                        target_node: NodeId(2),
+                        target_port: PortId(0),
+                    },
+                    Connection {
+                        source_node: NodeId(2),
+                        source_port: PortId(0),
+                        target_node: NodeId(3),
+                        target_port: PortId(0),
+                    },
+                ],
+            },
+        };
 
         let dir = std::env::temp_dir().join("tonedock_test_roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
@@ -191,10 +263,48 @@ mod tests {
 
         let loaded = Session::load_from_file(&path).unwrap();
         assert_eq!(loaded.name, "test_session");
-        assert!(loaded.graph.is_some());
-        let g = loaded.graph.unwrap();
-        assert_eq!(g.nodes.len(), 3);
-        assert_eq!(g.connections.len(), 2);
+        assert_eq!(loaded.preset.name, "test_preset");
+        assert_eq!(loaded.preset.graph.nodes.len(), 3);
+        assert_eq!(loaded.preset.graph.connections.len(), 2);
+        assert_eq!(
+            loaded.preset.graph.nodes[1].plugin_state,
+            Some(vec![1, 2, 3, 4])
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_legacy_graph_promoted_to_preset() {
+        let mut session = Session::default();
+        session.name = "legacy_graph".into();
+        session.graph = Some(SerializedGraph {
+            nodes: vec![
+                SerializedNode {
+                    id: NodeId(1),
+                    node_type: NodeType::AudioInput,
+                    ..Default::default()
+                },
+                SerializedNode {
+                    id: NodeId(2),
+                    node_type: NodeType::AudioOutput,
+                    ..Default::default()
+                },
+            ],
+            connections: vec![],
+        });
+
+        let dir = std::env::temp_dir().join("tonedock_test_graph_legacy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy_graph.tonedock.json");
+        session.save_to_file(&path).unwrap();
+
+        let loaded = Session::load_from_file(&path).unwrap();
+        assert_eq!(loaded.preset.name, "legacy_graph");
+        assert_eq!(loaded.preset.graph.nodes.len(), 2);
+        assert!(loaded.graph.is_none());
+        assert!(loaded.chain.is_empty());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
@@ -225,20 +335,22 @@ mod tests {
         session.save_to_file(&path).unwrap();
 
         let loaded = Session::load_from_file(&path).unwrap();
-        assert!(loaded.graph.is_some());
-        let g = loaded.graph.unwrap();
+        let g = &loaded.preset.graph;
 
+        assert_eq!(loaded.preset.name, "legacy");
         assert_eq!(g.nodes.len(), 4);
         assert_eq!(g.connections.len(), 3);
 
-        assert!(g
-            .nodes
-            .iter()
-            .any(|n| matches!(n.node_type, NodeType::AudioInput)));
-        assert!(g
-            .nodes
-            .iter()
-            .any(|n| matches!(n.node_type, NodeType::AudioOutput)));
+        assert!(
+            g.nodes
+                .iter()
+                .any(|n| matches!(n.node_type, NodeType::AudioInput))
+        );
+        assert!(
+            g.nodes
+                .iter()
+                .any(|n| matches!(n.node_type, NodeType::AudioOutput))
+        );
         assert!(g.nodes.iter().any(|n| matches!(
             &n.node_type,
             NodeType::VstPlugin {
@@ -247,16 +359,26 @@ mod tests {
             } if plugin_path == "/path/to/amp.dll" && plugin_name == "Amp Sim"
         )));
 
-        let amp_node = g.nodes.iter().find(|n| {
-            matches!(&n.node_type, NodeType::VstPlugin { plugin_name, .. } if plugin_name == "Amp Sim")
-        }).unwrap();
+        let amp_node = g
+            .nodes
+            .iter()
+            .find(|n| {
+                matches!(&n.node_type, NodeType::VstPlugin { plugin_name, .. } if plugin_name == "Amp Sim")
+            })
+            .unwrap();
         assert!(amp_node.enabled);
         assert_eq!(amp_node.parameters, vec![(0u32, 0.5f32), (1u32, 0.8f32)]);
 
-        let reverb_node = g.nodes.iter().find(|n| {
-            matches!(&n.node_type, NodeType::VstPlugin { plugin_name, .. } if plugin_name == "Reverb")
-        }).unwrap();
+        let reverb_node = g
+            .nodes
+            .iter()
+            .find(|n| {
+                matches!(&n.node_type, NodeType::VstPlugin { plugin_name, .. } if plugin_name == "Reverb")
+            })
+            .unwrap();
         assert!(!reverb_node.enabled);
+        assert!(loaded.graph.is_none());
+        assert!(loaded.chain.is_empty());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
@@ -274,7 +396,7 @@ mod tests {
         session.save_to_file(&path).unwrap();
 
         let loaded = Session::load_from_file(&path).unwrap();
-        assert!(loaded.graph.is_none());
+        assert!(loaded.preset.graph.nodes.is_empty());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
@@ -304,19 +426,19 @@ mod tests {
             g.connections.iter().any(|c| {
                 matches!(c.source_node, NodeId(1)) && matches!(c.target_node, NodeId(3))
             }),
-            "Input → first plugin"
+            "Input -> first plugin"
         );
         assert!(
             g.connections.iter().any(|c| {
                 matches!(c.source_node, NodeId(3)) && matches!(c.target_node, NodeId(4))
             }),
-            "first plugin → second plugin"
+            "first plugin -> second plugin"
         );
         assert!(
             g.connections.iter().any(|c| {
                 matches!(c.source_node, NodeId(4)) && matches!(c.target_node, NodeId(2))
             }),
-            "second plugin → Output"
+            "second plugin -> Output"
         );
     }
 }

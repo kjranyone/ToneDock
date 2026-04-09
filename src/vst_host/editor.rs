@@ -3,25 +3,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use vst3::ComPtr;
 use vst3::Steinberg::Vst::IEditController;
-use vst3::Steinberg::{kResultOk, tresult, uint32, TUID};
 use vst3::Steinberg::{FUnknown_iid, IPlugFrame_iid};
 use vst3::Steinberg::{IPlugFrame, IPlugView, ViewRect};
+use vst3::Steinberg::{TUID, kResultOk, tresult, uint32};
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::Gdi::UpdateWindow,
-    System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED},
+    System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
     System::LibraryLoader::{
-        GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleFileNameW, GetModuleHandleExW,
     },
     UI::HiDpi::GetDpiForWindow,
     UI::WindowsAndMessaging::{
-        AdjustWindowRect, CreateWindowExW, DefWindowProcW, DestroyWindow, IsWindow, LoadCursorW,
-        MoveWindow, RegisterClassW, SetWindowPos, ShowWindow, CS_DBLCLKS, CS_HREDRAW, CS_OWNDC,
-        CS_VREDRAW,
-        CW_USEDEFAULT, IDC_ARROW, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WNDCLASSW, WS_CHILD,
-        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        AdjustWindowRect, CS_DBLCLKS, CS_HREDRAW, CS_OWNDC, CS_VREDRAW, CW_USEDEFAULT,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, IDC_ARROW, IsWindow, LoadCursorW,
+        MoveWindow, RegisterClassW, SW_SHOW, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos, ShowWindow,
+        WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT,
+        WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     },
 };
 
@@ -186,7 +186,7 @@ unsafe extern "system" fn host_frame_resize_view(
 #[cfg(target_os = "windows")]
 fn pump_message_queue(hwnd: windows_sys::Win32::Foundation::HWND) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+        DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
     };
     unsafe {
         let mut msg: MSG = std::mem::zeroed();
@@ -427,7 +427,9 @@ impl PluginEditor {
         {
             let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
             if hr as u32 == 0x80010106u32 {
-                log::warn!("open_internal: CoInitializeEx returned RPC_E_CHANGED_MODE (thread already in MTA)");
+                log::warn!(
+                    "open_internal: CoInitializeEx returned RPC_E_CHANGED_MODE (thread already in MTA)"
+                );
             } else if hr < 0 {
                 log::warn!("open_internal: CoInitializeEx returned 0x{:08X}", hr as u32);
             } else {
@@ -519,8 +521,10 @@ impl PluginEditor {
                     }
                     let owner_dpi = unsafe { GetDpiForWindow(hwnd) };
                     let child_dpi = unsafe { GetDpiForWindow(child_hwnd) };
-                    let mut owner_rect: windows_sys::Win32::Foundation::RECT = unsafe { std::mem::zeroed() };
-                    let mut child_rect: windows_sys::Win32::Foundation::RECT = unsafe { std::mem::zeroed() };
+                    let mut owner_rect: windows_sys::Win32::Foundation::RECT =
+                        unsafe { std::mem::zeroed() };
+                    let mut child_rect: windows_sys::Win32::Foundation::RECT =
+                        unsafe { std::mem::zeroed() };
                     unsafe {
                         windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(
                             hwnd,
@@ -588,14 +592,29 @@ impl PluginEditor {
                         );
                         log::error!(
                             "open_internal: [rdi] = [{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]",
-                            rdi_dump[0], rdi_dump[1], rdi_dump[2], rdi_dump[3],
-                            rdi_dump[4], rdi_dump[5], rdi_dump[6], rdi_dump[7],
-                            rdi_dump[8], rdi_dump[9], rdi_dump[10], rdi_dump[11],
-                            rdi_dump[12], rdi_dump[13], rdi_dump[14], rdi_dump[15]
+                            rdi_dump[0],
+                            rdi_dump[1],
+                            rdi_dump[2],
+                            rdi_dump[3],
+                            rdi_dump[4],
+                            rdi_dump[5],
+                            rdi_dump[6],
+                            rdi_dump[7],
+                            rdi_dump[8],
+                            rdi_dump[9],
+                            rdi_dump[10],
+                            rdi_dump[11],
+                            rdi_dump[12],
+                            rdi_dump[13],
+                            rdi_dump[14],
+                            rdi_dump[15]
                         );
                         log::error!(
                             "open_internal: [rdi+0x08]={} [rdi+0x0c]={} [rdi+0x10]={} [rdi+0x14]={}",
-                            rdi_dump[2], rdi_dump[3], rdi_dump[4], rdi_dump[5]
+                            rdi_dump[2],
+                            rdi_dump[3],
+                            rdi_dump[4],
+                            rdi_dump[5]
                         );
                     }
                     if result != kResultOk {
@@ -804,7 +823,9 @@ mod tests {
         unsafe {
             let _ = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
         }
-        let path = std::env::var("TEST_VST_EDITOR_PATH").ok().map(PathBuf::from);
+        let path = std::env::var("TEST_VST_EDITOR_PATH")
+            .ok()
+            .map(PathBuf::from);
         let Some(path) = path else {
             return;
         };

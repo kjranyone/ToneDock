@@ -57,7 +57,7 @@ impl UndoManager {
 
     pub fn push(&mut self, step: UndoStep) {
         if step.is_continuous {
-            if let Some(top) = self.undo_stack.last() {
+            if let Some(top) = self.undo_stack.last_mut() {
                 if top.is_continuous && top.actions.len() == step.actions.len() {
                     let same_nodes = top.actions.iter().zip(step.actions.iter()).all(|(a, b)| {
                         matches!(
@@ -69,6 +69,20 @@ impl UndoManager {
                         )
                     });
                     if same_nodes {
+                        for (existing, incoming) in top.actions.iter_mut().zip(step.actions.iter())
+                        {
+                            if let (
+                                UndoAction::ChangedState { new_state, .. },
+                                UndoAction::ChangedState {
+                                    new_state: incoming_new_state,
+                                    ..
+                                },
+                            ) = (existing, incoming)
+                            {
+                                *new_state = incoming_new_state.clone();
+                            }
+                        }
+                        top.label = step.label;
                         self.redo_stack.clear();
                         return;
                     }
@@ -192,13 +206,24 @@ mod tests {
 
         assert!(mgr.can_undo());
         let step = mgr.pop_undo().unwrap();
-        assert_eq!(step.label, "drag1");
+        assert_eq!(step.label, "drag2");
         assert_eq!(
             step.actions[0],
             UndoAction::ChangedState {
                 node_id: NodeId(1),
                 old_state: NodeInternalState::Gain { value: 0.5 },
-                new_state: NodeInternalState::Gain { value: 0.6 },
+                new_state: NodeInternalState::Gain { value: 0.7 },
+            }
+        );
+
+        let redo_step = mgr.pop_redo().unwrap();
+        assert_eq!(redo_step.label, "drag2");
+        assert_eq!(
+            redo_step.actions[0],
+            UndoAction::ChangedState {
+                node_id: NodeId(1),
+                old_state: NodeInternalState::Gain { value: 0.5 },
+                new_state: NodeInternalState::Gain { value: 0.7 },
             }
         );
     }

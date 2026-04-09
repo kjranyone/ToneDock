@@ -2,6 +2,8 @@ use egui::*;
 
 pub const BG_SURFACE: Color32 = Color32::from_rgb(16, 16, 20);
 pub const BG_PANEL: Color32 = Color32::from_rgb(24, 24, 30);
+pub const BG_TEXTURE_TOP: Color32 = Color32::from_rgb(44, 40, 34);
+pub const BG_TEXTURE_BOTTOM: Color32 = Color32::from_rgb(11, 11, 15);
 #[allow(dead_code)]
 pub const BG_CARD: Color32 = Color32::from_rgb(34, 34, 42);
 #[allow(dead_code)]
@@ -38,6 +40,7 @@ pub const ON_TERTIARY_CONTAINER: Color32 = Color32::from_rgb(255, 216, 228);
 
 pub const ACCENT: Color32 = Color32::from_rgb(208, 188, 255);
 pub const ACCENT_DIM: Color32 = Color32::from_rgb(79, 55, 139);
+pub const ACCENT_WARM: Color32 = Color32::from_rgb(214, 152, 74);
 
 #[allow(dead_code)]
 pub const SURFACE: Color32 = Color32::from_rgb(20, 20, 24);
@@ -196,6 +199,80 @@ pub fn apply_style(ctx: &Context) {
     };
 
     ctx.set_style(style);
+}
+
+pub fn paint_panel_texture(painter: &Painter, rect: Rect) {
+    painter.rect_filled(rect, 0.0, BG_TEXTURE_BOTTOM);
+
+    let band_h = rect.height() * 0.18;
+    painter.rect_filled(
+        Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + band_h)),
+        0.0,
+        Color32::from_rgba_unmultiplied(
+            BG_TEXTURE_TOP.r(),
+            BG_TEXTURE_TOP.g(),
+            BG_TEXTURE_TOP.b(),
+            70,
+        ),
+    );
+
+    let stripes = 28;
+    for i in 0..stripes {
+        let t = i as f32 / stripes as f32;
+        let y = rect.top() + rect.height() * t;
+        let alpha = if i % 2 == 0 { 14 } else { 7 };
+        painter.line_segment(
+            [pos2(rect.left(), y), pos2(rect.right(), y)],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, alpha)),
+        );
+    }
+
+    for i in 0..18 {
+        let t = i as f32 / 17.0;
+        let x = rect.left() + rect.width() * t;
+        painter.line_segment(
+            [pos2(x, rect.top()), pos2(x, rect.bottom())],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 5)),
+        );
+    }
+
+    painter.rect_stroke(
+        rect.shrink(0.5),
+        CornerRadius::ZERO,
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18)),
+        StrokeKind::Inside,
+    );
+}
+
+pub fn paint_rack_bay(painter: &Painter, rect: Rect) {
+    painter.rect_filled(rect, CornerRadius::same(18), Color32::from_rgb(18, 18, 22));
+    painter.rect_filled(
+        rect.shrink(8.0),
+        CornerRadius::same(14),
+        Color32::from_rgb(8, 8, 10),
+    );
+
+    let rail_w = 26.0;
+    for x in [rect.left() + 12.0, rect.right() - 12.0 - rail_w] {
+        let rail = Rect::from_min_max(
+            pos2(x, rect.top() + 18.0),
+            pos2(x + rail_w, rect.bottom() - 18.0),
+        );
+        painter.rect_filled(rail, CornerRadius::same(12), Color32::from_rgb(22, 22, 26));
+        for i in 0..9 {
+            let cy = rail.top() + 24.0 + i as f32 * ((rail.height() - 48.0) / 8.0);
+            painter.circle_filled(
+                pos2(rail.center().x, cy),
+                3.0,
+                Color32::from_rgb(48, 48, 54),
+            );
+            painter.circle_filled(
+                pos2(rail.center().x, cy) + vec2(-0.7, -0.7),
+                1.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 30),
+            );
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]

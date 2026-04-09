@@ -1,5 +1,31 @@
 use serde::{Deserialize, Serialize};
 
+mod option_base64 {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(bytes) => serializer.serialize_some(&STANDARD.encode(bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = Option::<String>::deserialize(deserializer)?;
+        encoded
+            .map(|value| STANDARD.decode(value).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
 
@@ -156,7 +182,7 @@ impl NodeType {
                 id: PortId(0),
                 name: "out".into(),
                 direction: PortDirection::Output,
-                channels: ChannelConfig::Mono,
+                channels: ChannelConfig::Stereo,
             }],
             NodeType::Mixer { .. } => vec![Port {
                 id: PortId(0),
@@ -285,6 +311,12 @@ pub struct SerializedNode {
     pub position: (f32, f32),
     #[serde(default)]
     pub parameters: Vec<(u32, f32)>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "option_base64"
+    )]
+    pub plugin_state: Option<Vec<u8>>,
     #[serde(default)]
     pub internal_state: NodeInternalState,
 }
@@ -298,6 +330,7 @@ impl Default for SerializedNode {
             bypassed: false,
             position: (0.0, 0.0),
             parameters: Vec::new(),
+            plugin_state: None,
             internal_state: NodeInternalState::None,
         }
     }

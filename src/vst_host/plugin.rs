@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
 use std::ptr;
 use std::slice;
@@ -12,8 +12,8 @@ use vst3::Steinberg::Vst::{
     IHostApplication, IMessage, IMessageTrait, ProcessSetup,
 };
 use vst3::Steinberg::{
-    int32, int64, kInvalidArgument, kNoInterface, kNotImplemented, kResultFalse, kResultOk,
-    kResultTrue, tresult, uint32, FUnknown, IBStream, IBStreamTrait, PClassInfo, TUID,
+    FUnknown, IBStream, IBStreamTrait, PClassInfo, TUID, int32, int64, kInvalidArgument,
+    kNoInterface, kNotImplemented, kResultFalse, kResultOk, kResultTrue, tresult, uint32,
 };
 use vst3::{ComPtr, ComWrapper, Interface};
 
@@ -255,7 +255,11 @@ impl vst3::Class for HostAttributeList {
 }
 
 impl IAttributeListTrait for HostAttributeList {
-    unsafe fn setInt(&self, id: vst3::Steinberg::Vst::IAttributeList_::AttrID, value: int64) -> tresult {
+    unsafe fn setInt(
+        &self,
+        id: vst3::Steinberg::Vst::IAttributeList_::AttrID,
+        value: int64,
+    ) -> tresult {
         let Some(key) = (unsafe { attr_key(id) }) else {
             return kInvalidArgument;
         };
@@ -461,8 +465,18 @@ struct MemoryStreamState {
 }
 
 impl MemoryStream {
+    fn from_bytes(data: Vec<u8>) -> Self {
+        Self {
+            state: Mutex::new(MemoryStreamState { data, position: 0 }),
+        }
+    }
+
     fn rewind(&self) {
         lock_recover(&self.state).position = 0;
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        lock_recover(&self.state).data.clone()
     }
 }
 
@@ -540,12 +554,7 @@ impl IBStreamTrait for MemoryStream {
         kResultOk
     }
 
-    unsafe fn seek(
-        &self,
-        pos: int64,
-        mode: int32,
-        result: *mut int64,
-    ) -> tresult {
+    unsafe fn seek(&self, pos: int64, mode: int32, result: *mut int64) -> tresult {
         let mut state = lock_recover(&self.state);
         let base = match mode {
             x if x == vst3::Steinberg::IBStream_::IStreamSeekMode_::kIBSeekSet => 0i64,
@@ -677,6 +686,8 @@ unsafe extern "C" {
     fn seh_call_get_controller_class_id(com_obj: *mut c_void, class_id: *mut c_void) -> i32;
     #[link_name = "seh_call_component_get_state"]
     fn seh_call_component_get_state(com_obj: *mut c_void, state: *mut c_void) -> i32;
+    #[link_name = "seh_call_component_set_state"]
+    fn seh_call_component_set_state(com_obj: *mut c_void, state: *mut c_void) -> i32;
     #[link_name = "seh_call_set_component_state"]
     fn seh_call_set_component_state(com_obj: *mut c_void, state: *mut c_void) -> i32;
     #[link_name = "seh_call_connection_point_connect"]
@@ -806,7 +817,12 @@ impl LoadedPlugin {
                 log::warn!("InitDll returned false for '{}'", info.name);
             }
         }
-        let exit_dll = unsafe { library.get(b"ExitDll").ok().map(|sym: libloading::Symbol<unsafe extern "system" fn() -> bool>| *sym) };
+        let exit_dll = unsafe {
+            library
+                .get(b"ExitDll")
+                .ok()
+                .map(|sym: libloading::Symbol<unsafe extern "system" fn() -> bool>| *sym)
+        };
         let get_factory: libloading::Symbol<unsafe extern "system" fn() -> *mut c_void> =
             unsafe { library.get(b"GetPluginFactory")? };
         let factory_ptr = unsafe { get_factory() };
@@ -872,14 +888,13 @@ impl LoadedPlugin {
         }
         let num_outputs = num_outputs_raw.max(1);
 
-        let audio_processor = query_plugin_interface::<IAudioProcessor>(component_ptr).ok_or_else(
-            || {
+        let audio_processor =
+            query_plugin_interface::<IAudioProcessor>(component_ptr).ok_or_else(|| {
                 anyhow::anyhow!(
                     "Failed to query IAudioProcessor interface for '{}'",
                     info.name
                 )
-            },
-        )?;
+            })?;
 
         let mut separate_controller = false;
         let mut edit_controller = query_plugin_interface::<IEditController>(component_ptr);
@@ -916,8 +931,7 @@ impl LoadedPlugin {
                 } else {
                     log::warn!("Failed to create separate controller for '{}'", info.name);
                 }
-            } else if controller_id_result != kNoInterface && controller_id_result != kResultFalse
-            {
+            } else if controller_id_result != kNoInterface && controller_id_result != kResultFalse {
                 log::warn!(
                     "getControllerClassId returned {} for '{}'",
                     controller_id_result,
@@ -1099,14 +1113,102 @@ impl LoadedPlugin {
         Ok(())
     }
 
+    pub fn save_state(&self) -> Option<Vec<u8>> {
+        let stream = ComWrapper::new(MemoryStream::default());
+        let stream_ptr = stream.to_com_ptr::<IBStream>().unwrap();
+
+        let get_state = unsafe {
+            seh_call_component_get_state(
+                self.component.as_ptr() as *mut c_void,
+                stream_ptr.as_ptr() as *mut c_void,
+            )
+        };
+        if !result_is_success(get_state) {
+            if get_state != kNotImplemented && get_state != kResultFalse {
+                log::warn!("getState returned {} for '{}'", get_state, self.info.name);
+            }
+            return None;
+        }
+
+        Some(stream.to_vec())
+    }
+
+    pub fn restore_state(&mut self, state: &[u8]) -> anyhow::Result<()> {
+        let stream = ComWrapper::new(MemoryStream::from_bytes(state.to_vec()));
+        let stream_ptr = stream.to_com_ptr::<IBStream>().unwrap();
+        let component = self.component.as_ptr() as *mut c_void;
+        let processor = self.audio_processor.as_ptr() as *mut c_void;
+        let was_active = self.block_size > 0;
+
+        if was_active {
+            let _ = unsafe { seh_call_set_processing(processor, 0) };
+            let _ = unsafe { seh_call_set_active(component, 0) };
+        }
+
+        let set_state =
+            unsafe { seh_call_component_set_state(component, stream_ptr.as_ptr() as *mut c_void) };
+        if !result_is_success(set_state) {
+            return Err(anyhow::anyhow!(
+                "IComponent::setState() returned {} for '{}'",
+                set_state,
+                self.info.name
+            ));
+        }
+
+        if let Some(ref ec) = self.edit_controller {
+            stream.rewind();
+            let sync_result = unsafe {
+                seh_call_set_component_state(
+                    ec.as_ptr() as *mut c_void,
+                    stream_ptr.as_ptr() as *mut c_void,
+                )
+            };
+            if !result_is_success(sync_result)
+                && sync_result != kNotImplemented
+                && sync_result != kResultFalse
+            {
+                log::warn!(
+                    "setComponentState returned {} for '{}'",
+                    sync_result,
+                    self.info.name
+                );
+            }
+        }
+
+        if was_active {
+            let reactivate = unsafe { seh_call_set_active(component, 1) };
+            if !result_is_success(reactivate) {
+                log::warn!(
+                    "setActive(true) returned {} after restore_state for '{}'",
+                    reactivate,
+                    self.info.name
+                );
+            }
+
+            let restart = unsafe { seh_call_set_processing(processor, 1) };
+            if !result_is_success(restart) {
+                log::warn!(
+                    "setProcessing(true) returned {} after restore_state for '{}'",
+                    restart,
+                    self.info.name
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn process_in_place(&mut self, buffer: &mut [&mut [f32]], num_frames: i32) {
         if buffer.is_empty() || num_frames == 0 {
             return;
         }
 
         let mut in_ptrs: Vec<*mut f32> = vec![buffer[0].as_mut_ptr()];
-        let mut out_ptrs: Vec<*mut f32> =
-            buffer.iter_mut().take(2).map(|ch| ch.as_mut_ptr()).collect();
+        let mut out_ptrs: Vec<*mut f32> = buffer
+            .iter_mut()
+            .take(2)
+            .map(|ch| ch.as_mut_ptr())
+            .collect();
 
         let in_bus = AudioBusBuffers {
             numChannels: in_ptrs.len() as i32,
@@ -1374,11 +1476,7 @@ mod tests {
         let mut out = [0u8; 4];
         assert_eq!(
             unsafe {
-                stream_ptr.read(
-                    out.as_mut_ptr() as *mut c_void,
-                    out.len() as i32,
-                    &mut read,
-                )
+                stream_ptr.read(out.as_mut_ptr() as *mut c_void, out.len() as i32, &mut read)
             },
             kResultOk
         );

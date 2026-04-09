@@ -8,7 +8,7 @@ use crate::audio::node::{
     ChannelConfig, Connection, LooperNodeState, MetronomeNodeState, NodeId, NodeInternalState,
     NodeType, PortId,
 };
-use crate::session::Session;
+use crate::session::{Preset, Session};
 use crate::ui::node_editor::{EdCmd, NodeEditor, NodeSnap};
 use crate::ui::preferences::{PreferencesResult, PreferencesState};
 use crate::ui::rack_view::RackView;
@@ -51,6 +51,17 @@ pub struct ToneDockApp {
     master_volume: f32,
     input_gain: f32,
     main_hwnd: Option<std::ptr::NonNull<std::ffi::c_void>>,
+}
+
+fn ui_section_frame() -> Frame {
+    Frame::new()
+        .fill(Color32::from_rgba_unmultiplied(18, 18, 22, 210))
+        .stroke(Stroke::new(
+            1.0,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+        ))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::symmetric(10, 6))
 }
 
 impl ToneDockApp {
@@ -172,6 +183,25 @@ impl ToneDockApp {
         }
     }
 
+    fn save_preset(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("ToneDock Preset", &["tonedock-preset.json"])
+            .set_file_name("preset.tonedock-preset.json")
+            .save_file()
+        {
+            let preset = self.build_preset();
+            let preset_name = preset.name.clone();
+            let p = path.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = preset.save_to_file(&p) {
+                    log::error!("Preset save failed: {}", e);
+                }
+            });
+            self.session.preset.name = preset_name;
+            self.status_message = format!("Preset saved to {}", path.display());
+        }
+    }
+
     fn load_session(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("ToneDock Session", &["tonedock.json"])
@@ -179,14 +209,43 @@ impl ToneDockApp {
         {
             match Session::load_from_file(&path) {
                 Ok(session) => {
-                    self.status_message = format!("Loaded: {}", session.name);
-                    if let Some(ref graph_data) = session.graph {
-                        self.audio_engine.load_serialized_graph(graph_data);
-                        if session.graph.is_some() && !session.chain.is_empty() {
-                            self.status_message =
-                                format!("Loaded: {} (migrated from legacy chain)", session.name);
+                    let host_id = self.audio_engine.current_host_id();
+                    let input_name = self
+                        .audio_engine
+                        .current_input_device_name()
+                        .map(str::to_owned);
+                    let output_name = self
+                        .audio_engine
+                        .current_output_device_name()
+                        .map(str::to_owned);
+
+                    if let Err(err) = self.audio_engine.restart_with_config(
+                        host_id,
+                        input_name.as_deref(),
+                        output_name.as_deref(),
+                        session.sample_rate as u32,
+                        session.buffer_size,
+                        self.audio_engine.input_channel,
+                        self.audio_engine.output_channels,
+                    ) {
+                        self.status_message = format!("Load error: {}", err);
+                        return;
+                    }
+
+                    if !session.preset.graph.nodes.is_empty()
+                        || !session.preset.graph.connections.is_empty()
+                    {
+                        if let Err(err) = self
+                            .audio_engine
+                            .load_serialized_graph(&session.preset.graph)
+                        {
+                            self.status_message = format!("Load error: {}", err);
+                            return;
                         }
                     }
+
+                    self.sync_transport_state_from_graph();
+                    self.status_message = format!("Loaded: {}", session.name);
                     self.session = session;
                 }
                 Err(e) => {
@@ -196,45 +255,94 @@ impl ToneDockApp {
         }
     }
 
-    fn build_session(&self) -> Session {
-        let chain = self.audio_engine.chain.lock();
-        let chain_slots: Vec<crate::session::ChainSlot> = chain
-            .slots
-            .iter()
-            .map(|s| crate::session::ChainSlot {
-                plugin_path: s.info.path.to_string_lossy().into_owned(),
-                plugin_name: s.info.name.clone(),
-                enabled: s.enabled,
-                parameters: Vec::new(),
-            })
-            .collect();
+    fn load_preset(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("ToneDock Preset", &["tonedock-preset.json"])
+            .pick_file()
+        {
+            match Preset::load_from_file(&path) {
+                Ok(preset) => {
+                    if let Err(err) = self.audio_engine.load_serialized_graph(&preset.graph) {
+                        self.status_message = format!("Preset load error: {}", err);
+                        return;
+                    }
 
-        let graph_data = {
-            let guard = self.audio_engine.graph.load();
-            let mut serialized_nodes = Vec::new();
-            for (&id, node) in guard.nodes() {
-                serialized_nodes.push(crate::audio::node::SerializedNode {
-                    id,
-                    node_type: node.node_type.clone(),
-                    enabled: node.enabled,
-                    bypassed: node.bypassed,
-                    position: node.position,
-                    parameters: Vec::new(),
-                    internal_state: node.internal_state.clone(),
-                });
+                    self.session.preset = preset.clone();
+                    self.sync_transport_state_from_graph();
+                    self.status_message = format!("Preset loaded: {}", preset.name);
+                }
+                Err(err) => {
+                    self.status_message = format!("Preset load error: {}", err);
+                }
             }
-            Some(crate::audio::node::SerializedGraph {
-                nodes: serialized_nodes,
-                connections: guard.connections().to_vec(),
-            })
+        }
+    }
+
+    fn build_preset(&self) -> Preset {
+        let preset_name = if self.session.preset.name.is_empty() {
+            self.session.name.clone()
+        } else {
+            self.session.preset.name.clone()
         };
 
+        Preset {
+            name: preset_name,
+            graph: self.audio_engine.snapshot_serialized_graph(),
+        }
+    }
+
+    fn build_session(&self) -> Session {
         Session {
             name: self.session.name.clone(),
             sample_rate: self.audio_engine.sample_rate,
             buffer_size: self.audio_engine.buffer_size,
-            chain: chain_slots,
-            graph: graph_data,
+            preset: self.build_preset(),
+            chain: Vec::new(),
+            graph: None,
+        }
+    }
+
+    fn sync_transport_state_from_graph(&mut self) {
+        self.metronome_enabled = false;
+        self.metronome_bpm = 120.0;
+        self.metronome_volume = 0.5;
+        self.metronome_node_id = None;
+
+        self.looper_enabled = false;
+        self.looper_recording = false;
+        self.looper_playing = false;
+        self.looper_overdubbing = false;
+        self.looper_node_id = None;
+
+        let guard = self.audio_engine.graph.load();
+        let mut node_ids: Vec<NodeId> = guard.nodes().keys().copied().collect();
+        node_ids.sort();
+
+        for node_id in node_ids {
+            let Some(node) = guard.get_node(node_id) else {
+                continue;
+            };
+
+            match (&node.node_type, &node.internal_state) {
+                (NodeType::Metronome, NodeInternalState::Metronome(state)) => {
+                    self.metronome_node_id = Some(node_id);
+                    self.metronome_enabled = node.enabled;
+                    self.metronome_bpm = state.bpm;
+                    self.metronome_volume = state.volume;
+                }
+                (NodeType::Looper, NodeInternalState::Looper(state)) => {
+                    self.looper_node_id = Some(node_id);
+                    self.looper_enabled = node.enabled && state.enabled;
+                    self.looper_recording = state.recording;
+                    self.looper_playing = state.playing;
+                    self.looper_overdubbing = state.overdubbing;
+                }
+                (NodeType::Looper, _) => {
+                    self.looper_node_id = Some(node_id);
+                    self.looper_enabled = node.enabled;
+                }
+                _ => {}
+            }
         }
     }
 
@@ -245,7 +353,7 @@ impl ToneDockApp {
             self.audio_engine.sample_rate as u32,
             self.audio_engine.buffer_size,
             self.custom_plugin_paths.clone(),
-            self.audio_engine.input_channels,
+            self.audio_engine.input_channel,
             self.audio_engine.output_channels,
         ));
     }
@@ -274,366 +382,523 @@ impl App for ToneDockApp {
             }
         }
 
-        let toolbar_fill = crate::ui::theme::SURFACE_CONTAINER;
-
         TopBottomPanel::top("toolbar")
-            .exact_height(48.0)
+            .exact_height(58.0)
             .frame(egui::Frame {
-                fill: toolbar_fill,
-                inner_margin: Margin::symmetric(12, 6),
-                stroke: Stroke::new(1.0, crate::ui::theme::OUTLINE_VAR),
+                fill: Color32::TRANSPARENT,
+                inner_margin: Margin::symmetric(10, 6),
+                stroke: Stroke::NONE,
                 ..Default::default()
             })
             .show(ctx, |ui| {
+                let bar_rect = ui.max_rect();
+                ui.painter().rect_filled(
+                    bar_rect,
+                    CornerRadius::ZERO,
+                    Color32::from_rgb(34, 36, 39),
+                );
+                ui.painter().rect_filled(
+                    Rect::from_min_max(bar_rect.min, pos2(bar_rect.max.x, bar_rect.min.y + 14.0)),
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 14),
+                );
+                for i in 0..18 {
+                    let y = bar_rect.top() + i as f32 * 3.0;
+                    ui.painter().line_segment(
+                        [pos2(bar_rect.left(), y), pos2(bar_rect.right(), y)],
+                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 4)),
+                    );
+                }
+                ui.painter().line_segment(
+                    [
+                        pos2(bar_rect.left(), bar_rect.bottom() - 1.0),
+                        pos2(bar_rect.right(), bar_rect.bottom() - 1.0),
+                    ],
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 180)),
+                );
+
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("ToneDock")
-                            .size(18.0)
-                            .color(crate::ui::theme::ACCENT)
-                            .strong(),
-                    );
-                    ui.add_space(8.0);
+                    ui.spacing_mut().item_spacing.x = 10.0;
 
-                    ui.separator();
-
-                    if ui.button("Save").clicked() {
-                        self.save_session();
-                    }
-                    if ui.button("Load").clicked() {
-                        self.load_session();
-                    }
-
-                    if ui.button("Settings").clicked() {
-                        self.open_preferences();
-                    }
-
-                    let running = self.audio_engine.is_running();
-                    let label = if running { "Stop" } else { "Start" };
-                    if ui.button(label).clicked() {
-                        if running {
-                            self.audio_engine.stop();
-                        } else {
-                            self.start_audio();
-                        }
-                    }
-
-                    let view_label = match self.view_mode {
-                        ViewMode::Rack => "Node Editor",
-                        ViewMode::NodeEditor => "Rack View",
-                    };
-                    if ui.button(view_label).clicked() {
-                        self.view_mode = match self.view_mode {
-                            ViewMode::Rack => ViewMode::NodeEditor,
-                            ViewMode::NodeEditor => ViewMode::Rack,
-                        };
-                    }
-
-                    if ui.button("About").clicked() {
-                        self.show_about = true;
-                    }
-
-                    let can_undo = self.undo_manager.can_undo();
-                    let can_redo = self.undo_manager.can_redo();
-                    ui.add_enabled_ui(can_undo, |ui| {
-                        if ui.button("\u{21a9}").clicked() {
-                            self.perform_undo();
-                        }
-                    });
-                    ui.add_enabled_ui(can_redo, |ui| {
-                        if ui.button("\u{21aa}").clicked() {
-                            self.perform_redo();
-                        }
-                    });
-
-                    ui.add_space(8.0);
-
-                    ui.label(
-                        RichText::new("Master")
-                            .size(10.0)
-                            .color(crate::ui::theme::TEXT_SECONDARY),
-                    );
-                    let mut vol = self.master_volume;
-                    ui.add(
-                        egui::Slider::new(&mut vol, 0.0..=1.0)
-                            .show_value(false)
-                            .trailing_fill(true),
-                    );
-                    if (vol - self.master_volume).abs() > 0.001 {
-                        self.master_volume = vol;
-                        *self.audio_engine.master_volume.lock() = vol;
-                    }
-
-                    ui.label(
-                        RichText::new("Gain")
-                            .size(10.0)
-                            .color(crate::ui::theme::TEXT_SECONDARY),
-                    );
-                    let mut gain = self.input_gain;
-                    ui.add(egui::DragValue::new(&mut gain).speed(0.01).range(0.0..=4.0));
-                    if (gain - self.input_gain).abs() > 0.001 {
-                        self.input_gain = gain;
-                        *self.audio_engine.input_gain.lock() = gain;
-                    }
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.vertical(|ui| {
                         ui.label(
-                            RichText::new(&self.status_message)
+                            RichText::new("ToneDock")
+                                .size(19.0)
+                                .color(crate::ui::theme::ACCENT)
+                                .strong(),
+                        );
+                        ui.label(
+                            RichText::new("Digital Guitar Rack")
                                 .size(10.0)
-                                .color(crate::ui::theme::TEXT_SECONDARY),
+                                .color(crate::ui::theme::TEXT_HINT),
                         );
                     });
-                });
-            });
 
-        let transport_fill = crate::ui::theme::SURFACE_CONTAINER;
+                    ui.add_space(8.0);
 
-        TopBottomPanel::bottom("transport")
-            .exact_height(44.0)
-            .frame(egui::Frame {
-                fill: transport_fill,
-                inner_margin: Margin::symmetric(12, 6),
-                stroke: Stroke::new(1.0, crate::ui::theme::OUTLINE_VAR),
-                ..Default::default()
-            })
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("METRONOME")
-                            .size(9.0)
-                            .color(crate::ui::theme::ACCENT),
-                    );
-
-                    if crate::ui::controls::draw_toggle(ui, "", self.metronome_enabled, 14.0) {
-                        self.metronome_enabled = !self.metronome_enabled;
-                        if self.metronome_node_id.is_none() && self.metronome_enabled {
-                            self.metronome_node_id = Some(self.audio_engine.add_metronome_node());
-                        }
-                        if let Some(id) = self.metronome_node_id {
-                            self.audio_engine.graph_set_state(
-                                id,
-                                NodeInternalState::Metronome(MetronomeNodeState {
-                                    bpm: self.metronome_bpm,
-                                    volume: self.metronome_volume,
-                                }),
-                            );
-                            self.audio_engine
-                                .graph_set_enabled(id, self.metronome_enabled);
-                            self.audio_engine.graph_commit_topology();
-                        }
-                    }
-
-                    ui.label("BPM:");
-                    let mut bpm = self.metronome_bpm;
-                    ui.add(
-                        egui::DragValue::new(&mut bpm)
-                            .speed(1.0)
-                            .range(40.0..=300.0),
-                    );
-                    if (bpm - self.metronome_bpm).abs() > 0.01 {
-                        self.metronome_bpm = bpm;
-                        if let Some(id) = self.metronome_node_id {
-                            self.audio_engine.graph_set_state(
-                                id,
-                                NodeInternalState::Metronome(MetronomeNodeState {
-                                    bpm,
-                                    volume: self.metronome_volume,
-                                }),
-                            );
-                        }
-                    }
-
-                    ui.label("Vol:");
-                    let mut vol = self.metronome_volume;
-                    ui.add(egui::Slider::new(&mut vol, 0.0..=1.0));
-                    if (vol - self.metronome_volume).abs() > 0.001 {
-                        self.metronome_volume = vol;
-                        if let Some(id) = self.metronome_node_id {
-                            self.audio_engine.graph_set_state(
-                                id,
-                                NodeInternalState::Metronome(MetronomeNodeState {
-                                    bpm: self.metronome_bpm,
-                                    volume: vol,
-                                }),
-                            );
-                        }
-                    }
-
-                    ui.separator();
-
-                    ui.label(
-                        RichText::new("LOOPER")
-                            .size(10.0)
-                            .color(crate::ui::theme::ACCENT),
-                    );
-
-                    if crate::ui::controls::draw_toggle(ui, "", self.looper_enabled, 14.0) {
-                        self.looper_enabled = !self.looper_enabled;
-                        if self.looper_node_id.is_none() && self.looper_enabled {
-                            self.looper_node_id = Some(self.audio_engine.add_looper_node());
-                        }
-                        if let Some(id) = self.looper_node_id {
-                            self.audio_engine.graph_set_state(
-                                id,
-                                NodeInternalState::Looper(LooperNodeState {
-                                    enabled: self.looper_enabled,
-                                    recording: false,
-                                    playing: false,
-                                    overdubbing: false,
-                                    cleared: false,
-                                }),
-                            );
-                            self.audio_engine.graph_set_enabled(id, self.looper_enabled);
-                            self.audio_engine.graph_commit_topology();
-                        }
-                        if !self.looper_enabled {
-                            self.looper_recording = false;
-                            self.looper_playing = false;
-                            self.looper_overdubbing = false;
-                            if let Some(id) = self.looper_node_id {
-                                self.audio_engine.graph_set_state(
-                                    id,
-                                    NodeInternalState::Looper(LooperNodeState {
-                                        enabled: false,
-                                        recording: false,
-                                        playing: false,
-                                        overdubbing: false,
-                                        cleared: true,
-                                    }),
-                                );
-                            }
-                        }
-                    }
-
-                    let rec_color = if self.looper_recording {
-                        crate::ui::theme::METER_RED
-                    } else {
-                        crate::ui::theme::TEXT_SECONDARY
-                    };
-                    ui.style_mut().visuals.override_text_color = Some(rec_color);
-                    if ui.button("Rec").clicked() {
-                        if self.looper_node_id.is_none() {
-                            self.looper_node_id = Some(self.audio_engine.add_looper_node());
-                        }
-                        self.looper_enabled = true;
-                        self.looper_recording = !self.looper_recording;
-                        self.looper_playing = if self.looper_recording { false } else { true };
-                        if let Some(id) = self.looper_node_id {
-                            self.audio_engine.graph_set_state(
-                                id,
-                                NodeInternalState::Looper(LooperNodeState {
-                                    enabled: true,
-                                    recording: self.looper_recording,
-                                    playing: self.looper_playing,
-                                    overdubbing: false,
-                                    cleared: false,
-                                }),
-                            );
-                            self.audio_engine.graph_set_enabled(id, true);
-                            self.audio_engine.graph_commit_topology();
-                        }
-                    }
-                    ui.style_mut().visuals.override_text_color =
-                        Some(crate::ui::theme::TEXT_PRIMARY);
-
-                    let play_color = if self.looper_playing {
-                        crate::ui::theme::METER_GREEN
-                    } else {
-                        crate::ui::theme::TEXT_SECONDARY
-                    };
-                    ui.style_mut().visuals.override_text_color = Some(play_color);
-                    if ui.button("Play").clicked() {
-                        if self.looper_node_id.is_none() {
-                            self.looper_node_id = Some(self.audio_engine.add_looper_node());
-                        }
-                        self.looper_playing = !self.looper_playing;
-                        self.looper_recording = false;
-                        if let Some(id) = self.looper_node_id {
-                            self.audio_engine.graph_set_state(
-                                id,
-                                NodeInternalState::Looper(LooperNodeState {
-                                    enabled: true,
-                                    recording: false,
-                                    playing: self.looper_playing,
-                                    overdubbing: self.looper_overdubbing,
-                                    cleared: false,
-                                }),
-                            );
-                            self.audio_engine.graph_set_enabled(id, true);
-                            self.audio_engine.graph_commit_topology();
-                        }
-                    }
-                    ui.style_mut().visuals.override_text_color =
-                        Some(crate::ui::theme::TEXT_PRIMARY);
-
-                    let od_color = if self.looper_overdubbing {
-                        crate::ui::theme::METER_YELLOW
-                    } else {
-                        crate::ui::theme::TEXT_SECONDARY
-                    };
-                    ui.style_mut().visuals.override_text_color = Some(od_color);
-                    if ui.button("Overdub").clicked() {
-                        self.looper_overdubbing = if self.looper_overdubbing {
-                            false
-                        } else if self.looper_playing {
-                            true
-                        } else {
-                            false
-                        };
-                        if let Some(id) = self.looper_node_id {
-                            self.audio_engine.graph_set_state(
-                                id,
-                                NodeInternalState::Looper(LooperNodeState {
-                                    enabled: true,
-                                    recording: self.looper_recording,
-                                    playing: self.looper_playing,
-                                    overdubbing: self.looper_overdubbing,
-                                    cleared: false,
-                                }),
-                            );
-                        }
-                    }
-                    ui.style_mut().visuals.override_text_color =
-                        Some(crate::ui::theme::TEXT_PRIMARY);
-
-                    if ui.button("Clear").clicked() {
-                        self.looper_recording = false;
-                        self.looper_playing = false;
-                        self.looper_overdubbing = false;
-                        if let Some(id) = self.looper_node_id {
-                            self.audio_engine.graph_set_state(
-                                id,
-                                NodeInternalState::Looper(LooperNodeState {
-                                    enabled: false,
-                                    recording: false,
-                                    playing: false,
-                                    overdubbing: false,
-                                    cleared: true,
-                                }),
-                            );
-                        }
-                    }
-
-                    if let Some(id) = self.looper_node_id {
-                        let guard = self.audio_engine.graph.load();
-                        let loop_samples = guard.looper_loop_length(id);
-                        drop(guard);
-                        if loop_samples > 0 {
-                            let sr = self.audio_engine.sample_rate;
-                            let secs = loop_samples as f64 / sr;
+                    ui_section_frame().show(ui, |ui| {
+                        ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(format!("{:.1}s", secs))
+                                RichText::new("FILE")
+                                    .size(9.0)
+                                    .color(crate::ui::theme::TEXT_HINT),
+                            );
+                            if ui.button("Save Session").clicked() {
+                                self.save_session();
+                            }
+                            if ui.button("Load Session").clicked() {
+                                self.load_session();
+                            }
+                            if ui.button("Save Preset").clicked() {
+                                self.save_preset();
+                            }
+                            if ui.button("Load Preset").clicked() {
+                                self.load_preset();
+                            }
+                            if ui.button("Settings").clicked() {
+                                self.open_preferences();
+                            }
+                        });
+                    });
+
+                    ui_section_frame().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("ENGINE")
+                                    .size(9.0)
+                                    .color(crate::ui::theme::TEXT_HINT),
+                            );
+                            let running = self.audio_engine.is_running();
+                            let label = if running { "Stop Audio" } else { "Start Audio" };
+                            if ui
+                                .add_sized(
+                                    [92.0, 28.0],
+                                    Button::new(label).fill(if running {
+                                        Color32::from_rgb(88, 42, 42)
+                                    } else {
+                                        Color32::from_rgb(48, 78, 56)
+                                    }),
+                                )
+                                .clicked()
+                            {
+                                if running {
+                                    self.audio_engine.stop();
+                                } else {
+                                    self.start_audio();
+                                }
+                            }
+
+                            ui.label(
+                                RichText::new("Master")
                                     .size(10.0)
                                     .color(crate::ui::theme::TEXT_SECONDARY),
                             );
-                        }
-                    }
+                            let mut vol = self.master_volume;
+                            ui.add_sized(
+                                [88.0, 22.0],
+                                egui::Slider::new(&mut vol, 0.0..=1.0)
+                                    .show_value(false)
+                                    .trailing_fill(true),
+                            );
+                            if (vol - self.master_volume).abs() > 0.001 {
+                                self.master_volume = vol;
+                                *self.audio_engine.master_volume.lock() = vol;
+                            }
+
+                            ui.label(
+                                RichText::new("Gain")
+                                    .size(10.0)
+                                    .color(crate::ui::theme::TEXT_SECONDARY),
+                            );
+                            let mut gain = self.input_gain;
+                            ui.add_sized(
+                                [58.0, 24.0],
+                                egui::DragValue::new(&mut gain).speed(0.01).range(0.0..=4.0),
+                            );
+                            if (gain - self.input_gain).abs() > 0.001 {
+                                self.input_gain = gain;
+                                *self.audio_engine.input_gain.lock() = gain;
+                            }
+                        });
+                    });
+
+                    ui_section_frame().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("VIEW")
+                                    .size(9.0)
+                                    .color(crate::ui::theme::TEXT_HINT),
+                            );
+                            let view_label = match self.view_mode {
+                                ViewMode::Rack => "Node View",
+                                ViewMode::NodeEditor => "Rack View",
+                            };
+                            if ui.button(view_label).clicked() {
+                                self.view_mode = match self.view_mode {
+                                    ViewMode::Rack => ViewMode::NodeEditor,
+                                    ViewMode::NodeEditor => ViewMode::Rack,
+                                };
+                            }
+                            if ui.button("About").clicked() {
+                                self.show_about = true;
+                            }
+                        });
+                    });
+
+                    ui_section_frame().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("EDIT")
+                                    .size(9.0)
+                                    .color(crate::ui::theme::TEXT_HINT),
+                            );
+                            let can_undo = self.undo_manager.can_undo();
+                            let can_redo = self.undo_manager.can_redo();
+                            ui.add_enabled_ui(can_undo, |ui| {
+                                if ui
+                                    .add_sized([42.0, 28.0], Button::new("\u{21a9}"))
+                                    .clicked()
+                                {
+                                    self.perform_undo();
+                                }
+                            });
+                            ui.add_enabled_ui(can_redo, |ui| {
+                                if ui
+                                    .add_sized([42.0, 28.0], Button::new("\u{21aa}"))
+                                    .clicked()
+                                {
+                                    self.perform_redo();
+                                }
+                            });
+                        });
+                    });
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui_section_frame().show(ui, |ui| {
+                            ui.label(
+                                RichText::new(&self.status_message)
+                                    .size(10.0)
+                                    .color(crate::ui::theme::TEXT_SECONDARY),
+                            );
+                        });
+                    });
                 });
             });
 
-        CentralPanel::default().show(ctx, |ui| match self.view_mode {
-            ViewMode::Rack => self.show_rack_view(ui),
-            ViewMode::NodeEditor => self.show_node_editor(ui),
-        });
+        TopBottomPanel::bottom("transport")
+            .exact_height(56.0)
+            .frame(egui::Frame {
+                fill: Color32::TRANSPARENT,
+                inner_margin: Margin::symmetric(10, 6),
+                stroke: Stroke::NONE,
+                ..Default::default()
+            })
+            .show(ctx, |ui| {
+                let bar_rect = ui.max_rect();
+                ui.painter().rect_filled(
+                    bar_rect,
+                    CornerRadius::ZERO,
+                    Color32::from_rgb(36, 38, 40),
+                );
+                ui.painter().rect_filled(
+                    Rect::from_min_max(
+                        pos2(bar_rect.left(), bar_rect.bottom() - 18.0),
+                        bar_rect.max,
+                    ),
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 44),
+                );
+                for i in 0..18 {
+                    let y = bar_rect.top() + i as f32 * 3.0;
+                    ui.painter().line_segment(
+                        [pos2(bar_rect.left(), y), pos2(bar_rect.right(), y)],
+                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 4)),
+                    );
+                }
+                ui.painter().line_segment(
+                    [
+                        pos2(bar_rect.left(), bar_rect.top()),
+                        pos2(bar_rect.right(), bar_rect.top()),
+                    ],
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 10)),
+                );
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+
+                    ui_section_frame().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("METRONOME")
+                                    .size(9.0)
+                                    .color(crate::ui::theme::ACCENT),
+                            );
+
+                            if crate::ui::controls::draw_toggle(
+                                ui,
+                                "",
+                                self.metronome_enabled,
+                                14.0,
+                            ) {
+                                self.metronome_enabled = !self.metronome_enabled;
+                                if self.metronome_node_id.is_none() && self.metronome_enabled {
+                                    self.metronome_node_id =
+                                        Some(self.audio_engine.add_metronome_node());
+                                }
+                                if let Some(id) = self.metronome_node_id {
+                                    self.audio_engine.graph_set_state(
+                                        id,
+                                        NodeInternalState::Metronome(MetronomeNodeState {
+                                            bpm: self.metronome_bpm,
+                                            volume: self.metronome_volume,
+                                        }),
+                                    );
+                                    self.audio_engine
+                                        .graph_set_enabled(id, self.metronome_enabled);
+                                    self.audio_engine.graph_commit_topology();
+                                }
+                            }
+
+                            ui.label("BPM");
+                            let mut bpm = self.metronome_bpm;
+                            ui.add_sized(
+                                [56.0, 24.0],
+                                egui::DragValue::new(&mut bpm)
+                                    .speed(1.0)
+                                    .range(40.0..=300.0),
+                            );
+                            if (bpm - self.metronome_bpm).abs() > 0.01 {
+                                self.metronome_bpm = bpm;
+                                if let Some(id) = self.metronome_node_id {
+                                    self.audio_engine.graph_set_state(
+                                        id,
+                                        NodeInternalState::Metronome(MetronomeNodeState {
+                                            bpm,
+                                            volume: self.metronome_volume,
+                                        }),
+                                    );
+                                }
+                            }
+
+                            ui.label("Vol");
+                            let mut vol = self.metronome_volume;
+                            ui.add_sized([74.0, 22.0], egui::Slider::new(&mut vol, 0.0..=1.0));
+                            if (vol - self.metronome_volume).abs() > 0.001 {
+                                self.metronome_volume = vol;
+                                if let Some(id) = self.metronome_node_id {
+                                    self.audio_engine.graph_set_state(
+                                        id,
+                                        NodeInternalState::Metronome(MetronomeNodeState {
+                                            bpm: self.metronome_bpm,
+                                            volume: vol,
+                                        }),
+                                    );
+                                }
+                            }
+                        });
+                    });
+
+                    ui_section_frame().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("LOOPER")
+                                    .size(10.0)
+                                    .color(crate::ui::theme::ACCENT),
+                            );
+
+                            if crate::ui::controls::draw_toggle(ui, "", self.looper_enabled, 14.0) {
+                                self.looper_enabled = !self.looper_enabled;
+                                if self.looper_node_id.is_none() && self.looper_enabled {
+                                    self.looper_node_id = Some(self.audio_engine.add_looper_node());
+                                }
+                                if let Some(id) = self.looper_node_id {
+                                    self.audio_engine.graph_set_state(
+                                        id,
+                                        NodeInternalState::Looper(LooperNodeState {
+                                            enabled: self.looper_enabled,
+                                            recording: false,
+                                            playing: false,
+                                            overdubbing: false,
+                                            cleared: false,
+                                        }),
+                                    );
+                                    self.audio_engine.graph_set_enabled(id, self.looper_enabled);
+                                    self.audio_engine.graph_commit_topology();
+                                }
+                                if !self.looper_enabled {
+                                    self.looper_recording = false;
+                                    self.looper_playing = false;
+                                    self.looper_overdubbing = false;
+                                    if let Some(id) = self.looper_node_id {
+                                        self.audio_engine.graph_set_state(
+                                            id,
+                                            NodeInternalState::Looper(LooperNodeState {
+                                                enabled: false,
+                                                recording: false,
+                                                playing: false,
+                                                overdubbing: false,
+                                                cleared: true,
+                                            }),
+                                        );
+                                    }
+                                }
+                            }
+
+                            let rec_fill = if self.looper_recording {
+                                Color32::from_rgb(112, 40, 40)
+                            } else {
+                                crate::ui::theme::SURFACE_CONTAINER_HIGH
+                            };
+                            if ui
+                                .add_sized([48.0, 28.0], Button::new("Rec").fill(rec_fill))
+                                .clicked()
+                            {
+                                if self.looper_node_id.is_none() {
+                                    self.looper_node_id = Some(self.audio_engine.add_looper_node());
+                                }
+                                self.looper_enabled = true;
+                                self.looper_recording = !self.looper_recording;
+                                self.looper_playing = !self.looper_recording;
+                                if let Some(id) = self.looper_node_id {
+                                    self.audio_engine.graph_set_state(
+                                        id,
+                                        NodeInternalState::Looper(LooperNodeState {
+                                            enabled: true,
+                                            recording: self.looper_recording,
+                                            playing: self.looper_playing,
+                                            overdubbing: false,
+                                            cleared: false,
+                                        }),
+                                    );
+                                    self.audio_engine.graph_set_enabled(id, true);
+                                    self.audio_engine.graph_commit_topology();
+                                }
+                            }
+
+                            let play_fill = if self.looper_playing {
+                                Color32::from_rgb(56, 80, 62)
+                            } else {
+                                crate::ui::theme::SURFACE_CONTAINER_HIGH
+                            };
+                            if ui
+                                .add_sized([50.0, 28.0], Button::new("Play").fill(play_fill))
+                                .clicked()
+                            {
+                                if self.looper_node_id.is_none() {
+                                    self.looper_node_id = Some(self.audio_engine.add_looper_node());
+                                }
+                                self.looper_playing = !self.looper_playing;
+                                self.looper_recording = false;
+                                if let Some(id) = self.looper_node_id {
+                                    self.audio_engine.graph_set_state(
+                                        id,
+                                        NodeInternalState::Looper(LooperNodeState {
+                                            enabled: true,
+                                            recording: false,
+                                            playing: self.looper_playing,
+                                            overdubbing: self.looper_overdubbing,
+                                            cleared: false,
+                                        }),
+                                    );
+                                    self.audio_engine.graph_set_enabled(id, true);
+                                    self.audio_engine.graph_commit_topology();
+                                }
+                            }
+
+                            let dub_fill = if self.looper_overdubbing {
+                                Color32::from_rgb(88, 72, 30)
+                            } else {
+                                crate::ui::theme::SURFACE_CONTAINER_HIGH
+                            };
+                            if ui
+                                .add_sized([68.0, 28.0], Button::new("Overdub").fill(dub_fill))
+                                .clicked()
+                            {
+                                self.looper_overdubbing = if self.looper_overdubbing {
+                                    false
+                                } else if self.looper_playing {
+                                    true
+                                } else {
+                                    false
+                                };
+                                if let Some(id) = self.looper_node_id {
+                                    self.audio_engine.graph_set_state(
+                                        id,
+                                        NodeInternalState::Looper(LooperNodeState {
+                                            enabled: true,
+                                            recording: self.looper_recording,
+                                            playing: self.looper_playing,
+                                            overdubbing: self.looper_overdubbing,
+                                            cleared: false,
+                                        }),
+                                    );
+                                }
+                            }
+
+                            if ui.add_sized([52.0, 28.0], Button::new("Clear")).clicked() {
+                                self.looper_recording = false;
+                                self.looper_playing = false;
+                                self.looper_overdubbing = false;
+                                if let Some(id) = self.looper_node_id {
+                                    self.audio_engine.graph_set_state(
+                                        id,
+                                        NodeInternalState::Looper(LooperNodeState {
+                                            enabled: false,
+                                            recording: false,
+                                            playing: false,
+                                            overdubbing: false,
+                                            cleared: true,
+                                        }),
+                                    );
+                                }
+                            }
+                        });
+                    });
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui_section_frame().show(ui, |ui| {
+                            if let Some(id) = self.looper_node_id {
+                                let guard = self.audio_engine.graph.load();
+                                let loop_samples = guard.looper_loop_length(id);
+                                drop(guard);
+                                if loop_samples > 0 {
+                                    let sr = self.audio_engine.sample_rate;
+                                    let secs = loop_samples as f64 / sr;
+                                    ui.label(
+                                        RichText::new(format!("Loop {:.1}s", secs))
+                                            .size(10.0)
+                                            .color(crate::ui::theme::TEXT_SECONDARY),
+                                    );
+                                } else {
+                                    ui.label(
+                                        RichText::new("Transport idle")
+                                            .size(10.0)
+                                            .color(crate::ui::theme::TEXT_HINT),
+                                    );
+                                }
+                            } else {
+                                ui.label(
+                                    RichText::new("Transport idle")
+                                        .size(10.0)
+                                        .color(crate::ui::theme::TEXT_HINT),
+                                );
+                            }
+                        });
+                    });
+                });
+            });
+
+        CentralPanel::default()
+            .frame(
+                Frame::new()
+                    .fill(crate::ui::theme::BG_DARK)
+                    .stroke(Stroke::NONE)
+                    .inner_margin(0.0),
+            )
+            .show(ctx, |ui| match self.view_mode {
+                ViewMode::Rack => self.show_rack_view(ui),
+                ViewMode::NodeEditor => self.show_node_editor(ui),
+            });
 
         if ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift) {
             self.perform_undo();
@@ -786,13 +1051,41 @@ impl App for ToneDockApp {
 impl ToneDockApp {
     fn show_rack_view(&mut self, ui: &mut Ui) {
         let screen_size = ui.ctx().screen_rect().size();
-        let side_width = 240.0;
+        let side_width = 280.0;
+        crate::ui::theme::paint_panel_texture(ui.painter(), ui.max_rect());
+        crate::ui::theme::paint_rack_bay(ui.painter(), ui.max_rect().shrink2(vec2(12.0, 12.0)));
 
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.set_max_width(screen_size.x - side_width - 20.0);
+                ui.set_max_width(screen_size.x - side_width - 36.0);
 
-                {
+                Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(12, 12, 16, 205))
+                    .corner_radius(CornerRadius::same(18))
+                    .stroke(Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 10),
+                    ))
+                    .inner_margin(18.0)
+                    .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("DIGITAL RACK")
+                                .size(12.0)
+                                .strong()
+                                .color(crate::ui::theme::ACCENT),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("{} plugins available", self.available_plugins.len()))
+                                    .size(10.0)
+                                    .color(crate::ui::theme::TEXT_HINT),
+                            );
+                        });
+                    });
+                    ui.add_space(10.0);
+
+                    {
                     let mut chain = self.audio_engine.chain.lock();
                     let sr = self.audio_engine.sample_rate;
                     let bs = self.audio_engine.buffer_size as i32;
@@ -807,6 +1100,9 @@ impl ToneDockApp {
 
                     for cmd in commands {
                         match cmd {
+                            crate::ui::rack_view::RackCommand::Select(idx) => {
+                                self.selected_chain_slot = Some(idx);
+                            }
                             crate::ui::rack_view::RackCommand::Add(plugin_idx) => {
                                 log::info!("Add command received: plugin_idx={}", plugin_idx);
                                 if let Some(info) = available.get(plugin_idx).cloned() {
@@ -906,44 +1202,84 @@ impl ToneDockApp {
                             _ => {}
                         }
                     }
-                }
+                }});
             });
 
             ui.vertical(|ui| {
                 ui.set_max_width(side_width);
 
-                let (out_l, out_r) = *self.audio_engine.output_level.lock();
-                crate::ui::meters::draw_stereo_meter(ui, "OUTPUT", out_l, out_r, side_width, 60.0);
+                Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(20, 20, 24, 230))
+                    .corner_radius(CornerRadius::same(18))
+                    .stroke(Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 10),
+                    ))
+                    .inner_margin(14.0)
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("RACK CONTROL")
+                                .size(11.0)
+                                .strong()
+                                .color(crate::ui::theme::ACCENT),
+                        );
+                        ui.add_space(8.0);
 
-                ui.add_space(4.0);
+                        let (out_l, out_r) = *self.audio_engine.output_level.lock();
+                        crate::ui::meters::draw_stereo_meter(
+                            ui,
+                            "MASTER OUT",
+                            out_l,
+                            out_r,
+                            side_width - 28.0,
+                            68.0,
+                        );
 
-                let (in_l, in_r) = *self.audio_engine.input_level.lock();
-                crate::ui::meters::draw_stereo_meter(ui, "INPUT", in_l, in_r, side_width, 60.0);
+                        ui.add_space(6.0);
 
-                ui.add_space(8.0);
+                        let (in_l, _) = *self.audio_engine.input_level.lock();
+                        crate::ui::meters::draw_mono_meter(
+                            ui,
+                            "MONO INPUT",
+                            in_l,
+                            side_width - 28.0,
+                            68.0,
+                        );
 
-                if let Some(idx) = self.selected_chain_slot.or_else(|| {
-                    if self.audio_engine.chain.lock().slots.len() == 1 {
-                        Some(0)
-                    } else {
-                        None
-                    }
-                }) {
-                    self.draw_parameter_panel(ui, idx);
-                } else {
-                    Frame::group(ui.style())
-                        .fill(crate::ui::theme::BG_PANEL)
-                        .inner_margin(12.0)
-                        .show(ui, |ui| {
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    RichText::new("Select a plugin to edit parameters")
-                                        .size(11.0)
-                                        .color(crate::ui::theme::TEXT_SECONDARY),
-                                );
-                            });
-                        });
-                }
+                        ui.add_space(10.0);
+
+                        if let Some(idx) = self.selected_chain_slot.or_else(|| {
+                            if self.audio_engine.chain.lock().slots.len() == 1 {
+                                Some(0)
+                            } else {
+                                None
+                            }
+                        }) {
+                            self.draw_parameter_panel(ui, idx);
+                        } else {
+                            Frame::group(ui.style())
+                                .fill(crate::ui::theme::BG_PANEL)
+                                .inner_margin(16.0)
+                                .corner_radius(CornerRadius::same(14))
+                                .show(ui, |ui| {
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(
+                                            RichText::new("No module selected")
+                                                .size(13.0)
+                                                .color(crate::ui::theme::TEXT_SECONDARY),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Select a rack unit to inspect and tweak parameters",
+                                            )
+                                            .size(10.0)
+                                            .color(crate::ui::theme::TEXT_HINT),
+                                        );
+                                    });
+                                });
+                        }
+                    });
             });
         });
     }
@@ -969,33 +1305,96 @@ impl ToneDockApp {
             (snaps, conns)
         };
 
-        let side_width = 200.0;
+        let side_width = 280.0;
         let screen_size = ui.ctx().screen_rect().size();
-        let full_w = screen_size.x - side_width - 20.0;
+        let full_w = screen_size.x - side_width - 30.0;
+        crate::ui::theme::paint_panel_texture(ui.painter(), ui.max_rect());
 
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.set_max_width(full_w);
-                let cmds = self
-                    .node_editor
-                    .show(ui, &snaps, &conns, &self.available_plugins);
-                self.process_editor_commands(cmds);
+                Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(10, 10, 14, 220))
+                    .corner_radius(CornerRadius::same(18))
+                    .stroke(Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 10),
+                    ))
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("SIGNAL FLOW")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(crate::ui::theme::ACCENT),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new("Hardware-style routing canvas")
+                                        .size(10.0)
+                                        .color(crate::ui::theme::TEXT_HINT),
+                                );
+                            });
+                        });
+                        ui.add_space(8.0);
+                        let cmds =
+                            self.node_editor
+                                .show(ui, &snaps, &conns, &self.available_plugins);
+                        self.process_editor_commands(cmds);
+                    });
             });
 
             ui.vertical(|ui| {
                 ui.set_max_width(side_width);
+                Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(18, 18, 24, 235))
+                    .corner_radius(CornerRadius::same(18))
+                    .stroke(Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 10),
+                    ))
+                    .inner_margin(14.0)
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("NODE INSPECTOR")
+                                .size(11.0)
+                                .strong()
+                                .color(crate::ui::theme::ACCENT),
+                        );
+                        ui.add_space(8.0);
 
-                let (out_l, out_r) = *self.audio_engine.output_level.lock();
-                crate::ui::meters::draw_stereo_meter(ui, "OUTPUT", out_l, out_r, side_width, 40.0);
-                ui.add_space(4.0);
-                let (in_l, in_r) = *self.audio_engine.input_level.lock();
-                crate::ui::meters::draw_stereo_meter(ui, "INPUT", in_l, in_r, side_width, 40.0);
+                        let (out_l, out_r) = *self.audio_engine.output_level.lock();
+                        crate::ui::meters::draw_stereo_meter(
+                            ui,
+                            "OUTPUT",
+                            out_l,
+                            out_r,
+                            side_width - 28.0,
+                            48.0,
+                        );
+                        ui.add_space(4.0);
+                        let (in_l, _) = *self.audio_engine.input_level.lock();
+                        crate::ui::meters::draw_mono_meter(
+                            ui,
+                            "MONO INPUT",
+                            in_l,
+                            side_width - 28.0,
+                            48.0,
+                        );
 
-                ui.add_space(8.0);
+                        ui.add_space(10.0);
 
-                if let Some(sel_id) = self.node_editor.selected_node() {
-                    self.draw_vst_parameter_panel(ui, sel_id);
-                }
+                        if let Some(sel_id) = self.node_editor.selected_node() {
+                            self.draw_vst_parameter_panel(ui, sel_id);
+                        } else {
+                            ui.label(
+                                RichText::new("Select a node to inspect")
+                                    .size(11.0)
+                                    .color(crate::ui::theme::TEXT_SECONDARY),
+                            );
+                        }
+                    });
             });
         });
     }
@@ -1469,14 +1868,29 @@ impl ToneDockApp {
 
 impl ToneDockApp {
     fn draw_parameter_panel(&mut self, ui: &mut Ui, slot_index: usize) {
+        let slot_name = {
+            let chain = self.audio_engine.chain.lock();
+            chain
+                .slots
+                .get(slot_index)
+                .map(|s| s.info.name.clone())
+                .unwrap_or_else(|| "PARAMETERS".into())
+        };
         Frame::group(ui.style())
             .fill(crate::ui::theme::BG_PANEL)
-            .inner_margin(8.0)
+            .inner_margin(12.0)
+            .corner_radius(CornerRadius::same(14))
             .show(ui, |ui| {
                 ui.label(
-                    RichText::new("PARAMETERS")
+                    RichText::new("MODULE EDIT")
                         .size(10.0)
-                        .color(crate::ui::theme::ACCENT),
+                        .color(crate::ui::theme::ACCENT)
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(slot_name)
+                        .size(14.0)
+                        .color(crate::ui::theme::TEXT_PRIMARY),
                 );
                 ui.add_space(4.0);
 
@@ -1521,7 +1935,7 @@ impl ToneDockApp {
 
                 if param_infos.is_empty() {
                     ui.label(
-                        RichText::new("No parameters")
+                        RichText::new("No exposed parameters")
                             .size(10.0)
                             .color(crate::ui::theme::TEXT_SECONDARY),
                     );
@@ -1556,7 +1970,8 @@ impl ToneDockApp {
         if !has_plugin {
             Frame::group(ui.style())
                 .fill(crate::ui::theme::BG_PANEL)
-                .inner_margin(8.0)
+                .inner_margin(12.0)
+                .corner_radius(CornerRadius::same(14))
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(
@@ -1579,11 +1994,18 @@ impl ToneDockApp {
 
         Frame::group(ui.style())
             .fill(crate::ui::theme::BG_PANEL)
-            .inner_margin(8.0)
+            .inner_margin(12.0)
+            .corner_radius(CornerRadius::same(14))
             .show(ui, |ui| {
                 ui.label(
-                    RichText::new(&node_name)
+                    RichText::new("PLUGIN EDITOR")
                         .size(10.0)
+                        .color(crate::ui::theme::ACCENT)
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(&node_name)
+                        .size(13.0)
                         .color(crate::ui::theme::ACCENT)
                         .strong(),
                 );
@@ -1622,7 +2044,7 @@ impl ToneDockApp {
 
                 if param_infos.is_empty() {
                     ui.label(
-                        RichText::new("No parameters")
+                        RichText::new("No exposed parameters")
                             .size(10.0)
                             .color(crate::ui::theme::TEXT_SECONDARY),
                     );
