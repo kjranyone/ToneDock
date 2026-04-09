@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use eframe::App;
@@ -11,8 +12,9 @@ use crate::audio::node::{
 use crate::session::{Preset, Session};
 use crate::ui::node_editor::{EdCmd, NodeEditor, NodeSnap};
 use crate::ui::preferences::{PreferencesResult, PreferencesState};
-use crate::ui::rack_view::RackView;
+use crate::ui::rack_view::{RackSlotView, RackView};
 use crate::undo::{UndoAction, UndoManager, UndoStep};
+use crate::vst_host::editor::PluginEditor;
 use crate::vst_host::scanner::PluginInfo;
 
 enum ViewMode {
@@ -27,7 +29,7 @@ pub struct ToneDockApp {
     view_mode: ViewMode,
     available_plugins: Vec<PluginInfo>,
     custom_plugin_paths: Vec<std::path::PathBuf>,
-    session: Session,
+    preset_name: String,
     undo_manager: UndoManager,
 
     metronome_enabled: bool,
@@ -41,7 +43,11 @@ pub struct ToneDockApp {
     looper_overdubbing: bool,
     looper_node_id: Option<NodeId>,
 
-    selected_chain_slot: Option<usize>,
+    selected_rack_node: Option<NodeId>,
+    rack_order: Vec<NodeId>,
+    rack_plugin_editors: HashMap<NodeId, PluginEditor>,
+    inline_rack_plugin_gui: bool,
+    inline_rack_editor_node: Option<NodeId>,
     show_about: bool,
     status_message: String,
 
@@ -65,6 +71,356 @@ fn ui_section_frame() -> Frame {
 }
 
 impl ToneDockApp {
+    fn rack_node_position(index: usize) -> (f32, f32) {
+        (120.0, 80.0 + index as f32 * 140.0)
+    }
+
+    fn discover_serial_rack_chain(graph: &crate::audio::graph::AudioGraph) -> Option<Vec<NodeId>> {
+        let input_id = graph.input_node_id()?;
+        let output_id = graph.output_node_id()?;
+        let mut current = input_id;
+        let mut chain = Vec::new();
+
+        loop {
+            let next_connections: Vec<_> = graph
+                .connections()
+                .iter()
+                .filter(|conn| conn.source_node == current)
+                .collect();
+            if next_connections.len() != 1 {
+                return None;
+            }
+
+            let next_node_id = next_connections[0].target_node;
+            if next_node_id == output_id {
+                return Some(chain);
+            }
+
+            let next_node = graph.get_node(next_node_id)?;
+            if !matches!(next_node.node_type, NodeType::VstPlugin { .. }) {
+                return None;
+            }
+
+            chain.push(next_node_id);
+            current = next_node_id;
+        }
+    }
+
+    fn rebuild_rack_projection_from_graph(&mut self) {
+        let ordered_ids = {
+            let guard = self.audio_engine.graph.load();
+            Self::discover_serial_rack_chain(&guard).unwrap_or_else(|| {
+                self.audio_engine
+                    .chain_node_ids
+                    .iter()
+                    .copied()
+                    .filter(|node_id| {
+                        guard.get_node(*node_id).is_some_and(|node| {
+                            matches!(node.node_type, NodeType::VstPlugin { .. })
+                        })
+                    })
+                    .collect()
+            })
+        };
+
+        self.audio_engine.chain_node_ids = ordered_ids;
+        self.rack_order
+            .retain(|node_id| self.audio_engine.chain_node_ids.contains(node_id));
+        for node_id in &self.audio_engine.chain_node_ids {
+            if !self.rack_order.contains(node_id) {
+                self.rack_order.push(*node_id);
+            }
+        }
+        self.rack_plugin_editors
+            .retain(|node_id, editor| self.rack_order.contains(node_id) && editor.is_open());
+
+        if self
+            .selected_rack_node
+            .is_some_and(|node_id| !self.rack_order.contains(&node_id))
+        {
+            self.selected_rack_node = None;
+            self.rack_view.selected_plugin = None;
+        }
+    }
+
+    fn select_rack_plugin_node(&mut self, node_id: Option<NodeId>) {
+        self.selected_rack_node = node_id;
+        self.rack_view.selected_plugin = node_id;
+        self.node_editor.set_selection(node_id);
+    }
+
+    fn rebuild_rack_signal_chain(&mut self) {
+        let chain_node_ids = self.audio_engine.chain_node_ids.clone();
+        let guard = self.audio_engine.graph.load();
+        let input_id = self.audio_engine.input_node_id;
+        let output_id = self.audio_engine.output_node_id;
+        let managed: std::collections::HashSet<NodeId> = std::iter::once(input_id)
+            .chain(chain_node_ids.iter().copied())
+            .chain(std::iter::once(output_id))
+            .collect();
+        let managed_connections: Vec<_> = guard
+            .connections()
+            .iter()
+            .filter(|conn| {
+                managed.contains(&conn.source_node) && managed.contains(&conn.target_node)
+            })
+            .cloned()
+            .collect();
+        drop(guard);
+
+        for conn in managed_connections {
+            self.audio_engine.graph_disconnect(
+                (conn.source_node, conn.source_port),
+                (conn.target_node, conn.target_port),
+            );
+        }
+
+        let mut previous = input_id;
+        for node_id in &chain_node_ids {
+            self.audio_engine.graph_connect(Connection {
+                source_node: previous,
+                source_port: PortId(0),
+                target_node: *node_id,
+                target_port: PortId(0),
+            });
+            previous = *node_id;
+        }
+
+        self.audio_engine.graph_connect(Connection {
+            source_node: previous,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        });
+        self.audio_engine.graph_commit_topology();
+        self.audio_engine.apply_commands_to_staging();
+    }
+
+    fn add_rack_plugin_to_graph(&mut self, info: &PluginInfo) -> anyhow::Result<NodeId> {
+        let node_type = NodeType::VstPlugin {
+            plugin_path: info.path.to_string_lossy().into_owned(),
+            plugin_name: info.name.clone(),
+        };
+        let index = self.audio_engine.chain_node_ids.len();
+        let (x, y) = Self::rack_node_position(index);
+        let node_id = self.audio_engine.add_node_with_position(node_type, x, y);
+        self.audio_engine.load_vst_plugin_to_node(node_id, info)?;
+        self.audio_engine.chain_node_ids.push(node_id);
+        self.rack_order.push(node_id);
+        self.rebuild_rack_signal_chain();
+        Ok(node_id)
+    }
+
+    fn remove_rack_plugin_from_graph(&mut self, node_id: NodeId) {
+        let Some(index) = self
+            .audio_engine
+            .chain_node_ids
+            .iter()
+            .position(|id| *id == node_id)
+        else {
+            return;
+        };
+
+        self.close_rack_editor(node_id);
+        self.audio_engine.chain_node_ids.remove(index);
+        self.rack_order.retain(|id| *id != node_id);
+        if self.node_editor.selected_node() == Some(node_id) {
+            self.node_editor.set_selection(None);
+        }
+        self.audio_engine.graph_remove_node(node_id);
+        self.audio_engine.apply_commands_to_staging();
+        self.rebuild_rack_signal_chain();
+    }
+
+    fn reorder_rack_plugin(&mut self, node_id: NodeId, target_index: usize) {
+        let Some(index) = self.rack_order.iter().position(|id| *id == node_id) else {
+            return;
+        };
+        if index == target_index || target_index >= self.rack_order.len() {
+            return;
+        }
+        let node_id = self.rack_order.remove(index);
+        self.rack_order.insert(target_index, node_id);
+    }
+
+    fn sync_rack_plugin_state(&mut self, node_id: NodeId, enabled: bool, bypassed: bool) {
+        self.audio_engine.graph_set_enabled(node_id, enabled);
+        self.audio_engine.graph_set_bypassed(node_id, bypassed);
+        self.audio_engine.apply_commands_to_staging();
+    }
+
+    fn close_rack_editor(&mut self, node_id: NodeId) {
+        if let Some(mut editor) = self.rack_plugin_editors.remove(&node_id) {
+            editor.close();
+        }
+        if self.inline_rack_editor_node == Some(node_id) {
+            self.inline_rack_editor_node = None;
+        }
+    }
+
+    fn close_all_rack_editors(&mut self) {
+        for (_, mut editor) in self.rack_plugin_editors.drain() {
+            editor.close();
+        }
+        self.inline_rack_editor_node = None;
+    }
+
+    fn open_rack_editor(&mut self, node_id: NodeId) {
+        if self.inline_rack_plugin_gui {
+            if self.inline_rack_editor_node != Some(node_id) {
+                self.close_all_rack_editors();
+            }
+            self.inline_rack_editor_node = Some(node_id);
+            return;
+        }
+
+        let (edit_controller, plugin_name) = {
+            let guard = self.audio_engine.graph.load();
+            let Some(node) = guard.get_node(node_id) else {
+                return;
+            };
+            let plugin_name = match &node.node_type {
+                NodeType::VstPlugin { plugin_name, .. } => plugin_name.clone(),
+                _ => return,
+            };
+            let edit_controller = node
+                .plugin_instance
+                .lock()
+                .as_ref()
+                .and_then(|plugin| plugin.edit_controller().cloned());
+            (edit_controller, plugin_name)
+        };
+
+        if let Some(edit_controller) = edit_controller {
+            let editor = self
+                .rack_plugin_editors
+                .entry(node_id)
+                .or_insert_with(PluginEditor::new);
+            match editor.open_separate_window(
+                &edit_controller,
+                &plugin_name,
+                self.main_hwnd.map(|h| h.as_ptr()),
+            ) {
+                Ok(()) => {
+                    self.status_message = format!("Opened editor: {}", plugin_name);
+                }
+                Err(err) => {
+                    log::error!("Failed to open editor for '{}': {}", plugin_name, err);
+                    self.status_message = format!("Editor error: {}", err);
+                }
+            }
+        }
+    }
+
+    fn ensure_inline_rack_editor(&mut self, ui: &Ui, node_id: NodeId, rect: Rect) {
+        if !self.inline_rack_plugin_gui {
+            return;
+        }
+
+        let Some(main_hwnd) = self.main_hwnd else {
+            return;
+        };
+
+        let (edit_controller, plugin_name) = {
+            let guard = self.audio_engine.graph.load();
+            let Some(node) = guard.get_node(node_id) else {
+                return;
+            };
+            let plugin_name = match &node.node_type {
+                NodeType::VstPlugin { plugin_name, .. } => plugin_name.clone(),
+                _ => return,
+            };
+            let edit_controller = node
+                .plugin_instance
+                .lock()
+                .as_ref()
+                .and_then(|plugin| plugin.edit_controller().cloned());
+            (edit_controller, plugin_name)
+        };
+
+        let Some(edit_controller) = edit_controller else {
+            return;
+        };
+
+        let pixels_per_point = ui.ctx().pixels_per_point();
+        let bounds = (
+            (rect.left() * pixels_per_point).round() as i32,
+            (rect.top() * pixels_per_point).round() as i32,
+            (rect.width() * pixels_per_point).round().max(1.0) as i32,
+            (rect.height() * pixels_per_point).round().max(1.0) as i32,
+        );
+
+        let editor = self
+            .rack_plugin_editors
+            .entry(node_id)
+            .or_insert_with(PluginEditor::new);
+
+        if editor.is_open() {
+            editor.set_embedded_bounds(bounds);
+            return;
+        }
+
+        if let Err(err) =
+            editor.open_embedded_window(&edit_controller, &plugin_name, main_hwnd.as_ptr(), bounds)
+        {
+            log::error!(
+                "Failed to open inline editor for '{}': {}",
+                plugin_name,
+                err
+            );
+            self.status_message = format!("Inline GUI error: {}", err);
+            self.inline_rack_editor_node = None;
+        }
+    }
+
+    fn build_rack_slots(&mut self) -> Vec<RackSlotView> {
+        self.rebuild_rack_projection_from_graph();
+
+        let guard = self.audio_engine.graph.load();
+        self.rack_order
+            .iter()
+            .filter_map(|node_id| {
+                let node = guard.get_node(*node_id)?;
+                let NodeType::VstPlugin {
+                    plugin_path,
+                    plugin_name,
+                } = &node.node_type
+                else {
+                    return None;
+                };
+
+                let plugin_info = self
+                    .available_plugins
+                    .iter()
+                    .find(|info| info.path.to_string_lossy() == plugin_path.as_str());
+                let plugin_instance = node.plugin_instance.lock();
+                let has_editor = plugin_instance
+                    .as_ref()
+                    .map(|plugin| plugin.has_editor())
+                    .unwrap_or(false);
+
+                Some(RackSlotView {
+                    node_id: *node_id,
+                    name: plugin_name.clone(),
+                    vendor: plugin_info
+                        .map(|info| info.vendor.clone())
+                        .unwrap_or_default(),
+                    category: plugin_info
+                        .map(|info| info.category.clone())
+                        .unwrap_or_default(),
+                    loaded: plugin_instance.is_some(),
+                    enabled: node.enabled,
+                    bypassed: node.bypassed,
+                    has_editor,
+                    editor_open: self
+                        .rack_plugin_editors
+                        .get(node_id)
+                        .is_some_and(|editor| editor.is_open()),
+                })
+            })
+            .collect()
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::ui::theme::apply_fonts(&cc.egui_ctx);
         crate::ui::theme::apply_style(&cc.egui_ctx);
@@ -81,7 +437,7 @@ impl ToneDockApp {
             view_mode: ViewMode::Rack,
             available_plugins: Vec::new(),
             custom_plugin_paths: Vec::new(),
-            session: Session::default(),
+            preset_name: "Untitled".into(),
             undo_manager: UndoManager::new(),
             metronome_enabled: false,
             metronome_bpm: 120.0,
@@ -92,7 +448,11 @@ impl ToneDockApp {
             looper_playing: false,
             looper_overdubbing: false,
             looper_node_id: None,
-            selected_chain_slot: None,
+            selected_rack_node: None,
+            rack_order: Vec::new(),
+            rack_plugin_editors: HashMap::new(),
+            inline_rack_plugin_gui: false,
+            inline_rack_editor_node: None,
             show_about: false,
             status_message: "Ready".into(),
             show_preferences: false,
@@ -166,23 +526,6 @@ impl ToneDockApp {
         }
     }
 
-    fn save_session(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("ToneDock Session", &["tonedock.json"])
-            .set_file_name("session.tonedock.json")
-            .save_file()
-        {
-            let session = self.build_session();
-            let p = path.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = session.save_to_file(&p) {
-                    log::error!("Save failed: {}", e);
-                }
-            });
-            self.status_message = format!("Saved to {}", path.display());
-        }
-    }
-
     fn save_preset(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("ToneDock Preset", &["tonedock-preset.json"])
@@ -197,108 +540,87 @@ impl ToneDockApp {
                     log::error!("Preset save failed: {}", e);
                 }
             });
-            self.session.preset.name = preset_name;
+            self.preset_name = preset_name;
             self.status_message = format!("Preset saved to {}", path.display());
         }
     }
 
-    fn load_session(&mut self) {
+    fn load_preset(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter(
+                "ToneDock Preset",
+                &["tonedock-preset.json", "tonedock.json"],
+            )
+            .pick_file()
+        {
+            let preset = match Preset::load_from_file(&path) {
+                Ok(preset) => preset,
+                Err(preset_err) => match Session::load_from_file(&path) {
+                    Ok(session) => session.preset,
+                    Err(session_err) => {
+                        self.status_message =
+                            format!("Preset load error: {} / {}", preset_err, session_err);
+                        return;
+                    }
+                },
+            };
+
+            if let Err(err) = self.audio_engine.load_serialized_graph(&preset.graph) {
+                self.status_message = format!("Preset load error: {}", err);
+                return;
+            }
+
+            self.close_all_rack_editors();
+            self.audio_engine.chain_node_ids.clear();
+            self.rack_order = preset.rack_order.clone();
+            self.select_rack_plugin_node(None);
+            self.preset_name = preset.name.clone();
+            self.sync_transport_state_from_graph();
+            self.status_message = format!("Preset loaded: {}", preset.name);
+        }
+    }
+
+    fn build_preset(&self) -> Preset {
+        let preset_name = if self.preset_name.is_empty() {
+            "Untitled".into()
+        } else {
+            self.preset_name.clone()
+        };
+
+        Preset {
+            name: preset_name,
+            graph: self.audio_engine.snapshot_serialized_graph(),
+            rack_order: self.rack_order.clone(),
+        }
+    }
+
+    fn import_session(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("ToneDock Session", &["tonedock.json"])
             .pick_file()
         {
             match Session::load_from_file(&path) {
                 Ok(session) => {
-                    let host_id = self.audio_engine.current_host_id();
-                    let input_name = self
+                    if let Err(err) = self
                         .audio_engine
-                        .current_input_device_name()
-                        .map(str::to_owned);
-                    let output_name = self
-                        .audio_engine
-                        .current_output_device_name()
-                        .map(str::to_owned);
-
-                    if let Err(err) = self.audio_engine.restart_with_config(
-                        host_id,
-                        input_name.as_deref(),
-                        output_name.as_deref(),
-                        session.sample_rate as u32,
-                        session.buffer_size,
-                        self.audio_engine.input_channel,
-                        self.audio_engine.output_channels,
-                    ) {
-                        self.status_message = format!("Load error: {}", err);
-                        return;
-                    }
-
-                    if !session.preset.graph.nodes.is_empty()
-                        || !session.preset.graph.connections.is_empty()
+                        .load_serialized_graph(&session.preset.graph)
                     {
-                        if let Err(err) = self
-                            .audio_engine
-                            .load_serialized_graph(&session.preset.graph)
-                        {
-                            self.status_message = format!("Load error: {}", err);
-                            return;
-                        }
-                    }
-
-                    self.sync_transport_state_from_graph();
-                    self.status_message = format!("Loaded: {}", session.name);
-                    self.session = session;
-                }
-                Err(e) => {
-                    self.status_message = format!("Load error: {}", e);
-                }
-            }
-        }
-    }
-
-    fn load_preset(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("ToneDock Preset", &["tonedock-preset.json"])
-            .pick_file()
-        {
-            match Preset::load_from_file(&path) {
-                Ok(preset) => {
-                    if let Err(err) = self.audio_engine.load_serialized_graph(&preset.graph) {
-                        self.status_message = format!("Preset load error: {}", err);
+                        self.status_message = format!("Session import error: {}", err);
                         return;
                     }
 
-                    self.session.preset = preset.clone();
+                    self.close_all_rack_editors();
+                    self.audio_engine.chain_node_ids.clear();
+                    self.rack_order = session.preset.rack_order.clone();
+                    self.select_rack_plugin_node(None);
+                    self.preset_name = session.preset.name;
                     self.sync_transport_state_from_graph();
-                    self.status_message = format!("Preset loaded: {}", preset.name);
+                    self.status_message = format!("Imported preset from {}", path.display());
                 }
                 Err(err) => {
-                    self.status_message = format!("Preset load error: {}", err);
+                    self.status_message = format!("Session import error: {}", err);
                 }
             }
-        }
-    }
-
-    fn build_preset(&self) -> Preset {
-        let preset_name = if self.session.preset.name.is_empty() {
-            self.session.name.clone()
-        } else {
-            self.session.preset.name.clone()
-        };
-
-        Preset {
-            name: preset_name,
-            graph: self.audio_engine.snapshot_serialized_graph(),
-        }
-    }
-
-    fn build_session(&self) -> Session {
-        Session {
-            name: self.session.name.clone(),
-            sample_rate: self.audio_engine.sample_rate,
-            buffer_size: self.audio_engine.buffer_size,
-            preset: self.build_preset(),
-            chain: Vec::new(),
-            graph: None,
         }
     }
 
@@ -355,6 +677,7 @@ impl ToneDockApp {
             self.custom_plugin_paths.clone(),
             self.audio_engine.input_channel,
             self.audio_engine.output_channels,
+            self.inline_rack_plugin_gui,
         ));
     }
 
@@ -443,17 +766,14 @@ impl App for ToneDockApp {
                                     .size(9.0)
                                     .color(crate::ui::theme::TEXT_HINT),
                             );
-                            if ui.button("Save Session").clicked() {
-                                self.save_session();
-                            }
-                            if ui.button("Load Session").clicked() {
-                                self.load_session();
-                            }
                             if ui.button("Save Preset").clicked() {
                                 self.save_preset();
                             }
                             if ui.button("Load Preset").clicked() {
                                 self.load_preset();
+                            }
+                            if ui.button("Import Session").clicked() {
+                                self.import_session();
                             }
                             if ui.button("Settings").clicked() {
                                 self.open_preferences();
@@ -535,8 +855,21 @@ impl App for ToneDockApp {
                             };
                             if ui.button(view_label).clicked() {
                                 self.view_mode = match self.view_mode {
-                                    ViewMode::Rack => ViewMode::NodeEditor,
-                                    ViewMode::NodeEditor => ViewMode::Rack,
+                                    ViewMode::Rack => {
+                                        if self.inline_rack_plugin_gui {
+                                            self.close_all_rack_editors();
+                                        }
+                                        self.node_editor.set_selection(self.selected_rack_node);
+                                        ViewMode::NodeEditor
+                                    }
+                                    ViewMode::NodeEditor => {
+                                        let selection =
+                                            self.node_editor.selected_node().filter(|node_id| {
+                                                self.audio_engine.chain_node_ids.contains(node_id)
+                                            });
+                                        self.select_rack_plugin_node(selection);
+                                        ViewMode::Rack
+                                    }
                                 };
                             }
                             if ui.button("About").clicked() {
@@ -989,6 +1322,15 @@ impl App for ToneDockApp {
                                 format!("Found {} plugins", self.available_plugins.len());
                         }
                     }
+                    PreferencesResult::SetInlineRackPluginGui(enabled) => {
+                        self.inline_rack_plugin_gui = enabled;
+                        self.close_all_rack_editors();
+                        self.status_message = if enabled {
+                            "Rack GUI mode: inline".into()
+                        } else {
+                            "Rack GUI mode: separate window".into()
+                        };
+                    }
                 }
             }
         }
@@ -1032,8 +1374,8 @@ impl App for ToneDockApp {
                         ui.label(format!("Plugins scanned: {}", self.available_plugins.len()));
                         ui.add_space(4.0);
                         ui.label(format!(
-                            "Chain slots: {}",
-                            self.audio_engine.chain.lock().slots.len()
+                            "Rack slots: {}",
+                            self.audio_engine.chain_node_ids.len()
                         ));
                     });
                 });
@@ -1068,141 +1410,152 @@ impl ToneDockApp {
                     ))
                     .inner_margin(18.0)
                     .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("DIGITAL RACK")
-                                .size(12.0)
-                                .strong()
-                                .color(crate::ui::theme::ACCENT),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(format!("{} plugins available", self.available_plugins.len()))
+                                RichText::new("DIGITAL RACK")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(crate::ui::theme::ACCENT),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} plugins available",
+                                        self.available_plugins.len()
+                                    ))
                                     .size(10.0)
                                     .color(crate::ui::theme::TEXT_HINT),
-                            );
+                                );
+                            });
                         });
+                        ui.add_space(10.0);
+
+                        let available = self.available_plugins.clone();
+                        let rack_slots = self.build_rack_slots();
+                        let commands = self.rack_view.show(ui, &rack_slots, &available);
+
+                        for cmd in commands {
+                            match cmd {
+                                crate::ui::rack_view::RackCommand::Select(node_id) => {
+                                    self.select_rack_plugin_node(Some(node_id));
+                                }
+                                crate::ui::rack_view::RackCommand::Add(plugin_idx) => {
+                                    if let Some(info) = available.get(plugin_idx).cloned() {
+                                        match self.add_rack_plugin_to_graph(&info) {
+                                            Ok(node_id) => {
+                                                self.select_rack_plugin_node(Some(node_id));
+                                                self.status_message = format!("Loaded: {}", info.name);
+                                            }
+                                            Err(err) => {
+                                                log::error!("Load error for {}: {}", info.name, err);
+                                                self.status_message =
+                                                    format!("Load error: {}", err);
+                                            }
+                                        }
+                                    }
+                                }
+                                crate::ui::rack_view::RackCommand::Remove(node_id) => {
+                                    self.remove_rack_plugin_from_graph(node_id);
+                                    if self.selected_rack_node == Some(node_id) {
+                                        self.select_rack_plugin_node(None);
+                                    }
+                                }
+                                crate::ui::rack_view::RackCommand::Reorder(node_id, target_index) => {
+                                    self.reorder_rack_plugin(node_id, target_index);
+                                }
+                                crate::ui::rack_view::RackCommand::ToggleBypass(node_id) => {
+                                    let state = {
+                                        let guard = self.audio_engine.graph.load();
+                                        guard
+                                            .get_node(node_id)
+                                            .map(|node| (node.enabled, !node.bypassed))
+                                    };
+                                    if let Some((enabled, bypassed)) = state {
+                                        self.sync_rack_plugin_state(node_id, enabled, bypassed);
+                                    }
+                                }
+                                crate::ui::rack_view::RackCommand::ToggleEnable(node_id) => {
+                                    let state = {
+                                        let guard = self.audio_engine.graph.load();
+                                        guard
+                                            .get_node(node_id)
+                                            .map(|node| (!node.enabled, node.bypassed))
+                                    };
+                                    if let Some((enabled, bypassed)) = state {
+                                        self.sync_rack_plugin_state(node_id, enabled, bypassed);
+                                    }
+                                }
+                                crate::ui::rack_view::RackCommand::OpenEditor(node_id) => {
+                                    self.open_rack_editor(node_id);
+                                }
+                                crate::ui::rack_view::RackCommand::CloseEditor(node_id) => {
+                                    self.close_rack_editor(node_id);
+                                    self.status_message = "Closed editor".into();
+                                }
+                            }
+                        }
+
+                        if self.inline_rack_plugin_gui {
+                            ui.add_space(12.0);
+                            let inline_node = self
+                                .inline_rack_editor_node
+                                .filter(|node_id| self.rack_order.contains(node_id));
+
+                            Frame::group(ui.style())
+                                .fill(crate::ui::theme::BG_PANEL)
+                                .inner_margin(10.0)
+                                .corner_radius(CornerRadius::same(14))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("INLINE GUI")
+                                                .size(10.0)
+                                                .color(crate::ui::theme::ACCENT)
+                                                .strong(),
+                                        );
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            if inline_node.is_some()
+                                                && ui.small_button("Close").clicked()
+                                            {
+                                                if let Some(node_id) = inline_node {
+                                                    self.close_rack_editor(node_id);
+                                                }
+                                            }
+                                        });
+                                    });
+                                    ui.add_space(6.0);
+
+                                    if let Some(node_id) = inline_node {
+                                        let preferred_size = self
+                                            .rack_plugin_editors
+                                            .get(&node_id)
+                                            .map(|editor| editor.preferred_size())
+                                            .unwrap_or((720, 420));
+                                        let available_width = ui.available_width().max(320.0);
+                                        let height = (preferred_size.1 as f32 / ui.ctx().pixels_per_point())
+                                            .clamp(220.0, 520.0);
+                                        let (rect, _) = ui.allocate_exact_size(
+                                            vec2(available_width, height),
+                                            Sense::hover(),
+                                        );
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            CornerRadius::same(10),
+                                            Color32::from_rgb(10, 10, 12),
+                                        );
+                                        self.ensure_inline_rack_editor(ui, node_id, rect);
+                                    } else {
+                                        ui.label(
+                                            RichText::new(
+                                                "Open GUI on a rack plugin to show it inline here.",
+                                            )
+                                            .size(10.0)
+                                            .color(crate::ui::theme::TEXT_SECONDARY),
+                                        );
+                                    }
+                                });
+                        }
                     });
-                    ui.add_space(10.0);
-
-                    {
-                    let mut chain = self.audio_engine.chain.lock();
-                    let sr = self.audio_engine.sample_rate;
-                    let bs = self.audio_engine.buffer_size as i32;
-
-                    let available = self.available_plugins.clone();
-                    let chain_slots = &mut chain.slots;
-
-                    let commands = self.rack_view.show(ui, chain_slots, &available);
-
-                    let mut deferred_editor_cmds: Vec<crate::ui::rack_view::RackCommand> =
-                        Vec::new();
-
-                    for cmd in commands {
-                        match cmd {
-                            crate::ui::rack_view::RackCommand::Select(idx) => {
-                                self.selected_chain_slot = Some(idx);
-                            }
-                            crate::ui::rack_view::RackCommand::Add(plugin_idx) => {
-                                log::info!("Add command received: plugin_idx={}", plugin_idx);
-                                if let Some(info) = available.get(plugin_idx).cloned() {
-                                    log::info!(
-                                        "Loading plugin: {} from {:?}",
-                                        info.name,
-                                        info.path
-                                    );
-                                    match chain.add_plugin(&info, sr, bs) {
-                                        Ok(()) => {
-                                            log::info!("Plugin loaded successfully: {}", info.name);
-                                            self.status_message = format!("Loaded: {}", info.name);
-                                        }
-                                        Err(e) => {
-                                            log::error!("Load error for {}: {}", info.name, e);
-                                            self.status_message = format!("Load error: {}", e);
-                                        }
-                                    }
-                                } else {
-                                    log::warn!(
-                                        "plugin_idx {} out of bounds (available: {})",
-                                        plugin_idx,
-                                        available.len()
-                                    );
-                                }
-                            }
-                            crate::ui::rack_view::RackCommand::Remove(idx) => {
-                                chain.remove_plugin(idx);
-                            }
-                            crate::ui::rack_view::RackCommand::Move(from, to) => {
-                                chain.move_plugin(from, to);
-                            }
-                            crate::ui::rack_view::RackCommand::ToggleBypass(idx) => {
-                                if let Some(slot) = chain.slots.get_mut(idx) {
-                                    slot.bypassed = !slot.bypassed;
-                                }
-                            }
-                            crate::ui::rack_view::RackCommand::ToggleEnable(idx) => {
-                                if let Some(slot) = chain.slots.get_mut(idx) {
-                                    slot.enabled = !slot.enabled;
-                                }
-                            }
-                            crate::ui::rack_view::RackCommand::OpenEditor(_)
-                            | crate::ui::rack_view::RackCommand::CloseEditor(_) => {
-                                deferred_editor_cmds.push(cmd);
-                            }
-                        }
-                    }
-
-                    drop(chain);
-
-                    for cmd in deferred_editor_cmds {
-                        match cmd {
-                            crate::ui::rack_view::RackCommand::OpenEditor(idx) => {
-                                let chain = self.audio_engine.chain.lock();
-                                let ec = chain
-                                    .slots
-                                    .get(idx)
-                                    .and_then(|s| s.instance.as_ref())
-                                    .and_then(|p| p.edit_controller().cloned());
-                                let name = chain.slots.get(idx).map(|s| s.info.name.clone());
-                                drop(chain);
-
-                                if let (Some(ec), Some(name)) = (ec, name) {
-                                    let mut chain = self.audio_engine.chain.lock();
-                                    if let Some(slot) = chain.slots.get_mut(idx) {
-                                        match slot.editor.open_separate_window(
-                                            &ec,
-                                            &name,
-                                            self.main_hwnd.map(|h| h.as_ptr()),
-                                        ) {
-                                            Ok(()) => {
-                                                self.status_message =
-                                                    format!("Opened editor: {}", name);
-                                            }
-                                            Err(e) => {
-                                                log::error!(
-                                                    "Failed to open editor for '{}': {}",
-                                                    name,
-                                                    e
-                                                );
-                                                self.status_message =
-                                                    format!("Editor error: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            crate::ui::rack_view::RackCommand::CloseEditor(idx) => {
-                                let mut chain = self.audio_engine.chain.lock();
-                                if let Some(slot) = chain.slots.get_mut(idx) {
-                                    let name = slot.info.name.clone();
-                                    slot.editor.close();
-                                    self.status_message = format!("Closed editor: {}", name);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }});
             });
 
             ui.vertical(|ui| {
@@ -1248,14 +1601,12 @@ impl ToneDockApp {
 
                         ui.add_space(10.0);
 
-                        if let Some(idx) = self.selected_chain_slot.or_else(|| {
-                            if self.audio_engine.chain.lock().slots.len() == 1 {
-                                Some(0)
-                            } else {
-                                None
-                            }
-                        }) {
-                            self.draw_parameter_panel(ui, idx);
+                        let selected_node = self.selected_rack_node.or_else(|| {
+                            (self.audio_engine.chain_node_ids.len() == 1)
+                                .then(|| self.audio_engine.chain_node_ids[0])
+                        });
+                        if let Some(node_id) = selected_node {
+                            self.draw_vst_parameter_panel(ui, node_id);
                         } else {
                             Frame::group(ui.style())
                                 .fill(crate::ui::theme::BG_PANEL)
@@ -1443,6 +1794,7 @@ impl ToneDockApp {
                         },
                     ) {
                         Ok(()) => {
+                            self.node_editor.set_selection(Some(id));
                             self.status_message = format!("Loaded VST: {}", plugin_name);
                         }
                         Err(e) => {
@@ -1471,6 +1823,19 @@ impl ToneDockApp {
                                 connections,
                             });
                         }
+                    }
+                    if let Some(index) = self
+                        .audio_engine
+                        .chain_node_ids
+                        .iter()
+                        .position(|n| *n == id)
+                    {
+                        self.close_rack_editor(id);
+                        self.audio_engine.chain_node_ids.remove(index);
+                        if self.selected_rack_node == Some(id) {
+                            self.select_rack_plugin_node(None);
+                        }
+                        self.rebuild_rack_signal_chain();
                     }
                     self.audio_engine.graph_remove_node(id);
                     self.audio_engine.apply_commands_to_staging();
@@ -1867,82 +2232,6 @@ impl ToneDockApp {
 }
 
 impl ToneDockApp {
-    fn draw_parameter_panel(&mut self, ui: &mut Ui, slot_index: usize) {
-        let slot_name = {
-            let chain = self.audio_engine.chain.lock();
-            chain
-                .slots
-                .get(slot_index)
-                .map(|s| s.info.name.clone())
-                .unwrap_or_else(|| "PARAMETERS".into())
-        };
-        Frame::group(ui.style())
-            .fill(crate::ui::theme::BG_PANEL)
-            .inner_margin(12.0)
-            .corner_radius(CornerRadius::same(14))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("MODULE EDIT")
-                        .size(10.0)
-                        .color(crate::ui::theme::ACCENT)
-                        .strong(),
-                );
-                ui.label(
-                    RichText::new(slot_name)
-                        .size(14.0)
-                        .color(crate::ui::theme::TEXT_PRIMARY),
-                );
-                ui.add_space(4.0);
-
-                let param_infos = {
-                    let chain = self.audio_engine.chain.lock();
-                    chain.get_parameter_info(slot_index)
-                };
-
-                let params_per_row = 3;
-                let knob_size = 50.0;
-
-                for chunk in param_infos.chunks(params_per_row) {
-                    ui.horizontal_wrapped(|ui| {
-                        for (j, _param) in chunk.iter().enumerate() {
-                            let param_idx = (chunk.as_ptr() as usize
-                                - param_infos.as_ptr() as usize)
-                                / std::mem::size_of::<crate::audio::chain::ParamInfo>()
-                                + j;
-                            let mut value = {
-                                let chain = self.audio_engine.chain.lock();
-                                chain.get_parameter(slot_index, param_idx).unwrap_or(0.0)
-                            };
-
-                            ui.vertical(|ui| {
-                                crate::ui::controls::draw_knob(
-                                    ui,
-                                    &mut value,
-                                    &chunk[j].name,
-                                    0.0,
-                                    1.0,
-                                    knob_size,
-                                );
-                            });
-
-                            {
-                                let mut chain = self.audio_engine.chain.lock();
-                                chain.set_parameter(slot_index, param_idx, value);
-                            }
-                        }
-                    });
-                }
-
-                if param_infos.is_empty() {
-                    ui.label(
-                        RichText::new("No exposed parameters")
-                            .size(10.0)
-                            .color(crate::ui::theme::TEXT_SECONDARY),
-                    );
-                }
-            });
-    }
-
     fn draw_vst_parameter_panel(&mut self, ui: &mut Ui, node_id: NodeId) {
         let node_name = {
             let guard = self.audio_engine.graph.load();

@@ -13,6 +13,7 @@ pub struct PreferencesState {
     pub audio: AudioSettingsState,
     pub custom_plugin_paths: Vec<std::path::PathBuf>,
     pub scan_status: String,
+    pub inline_rack_plugin_gui: bool,
 }
 
 pub struct AudioSettingsState {
@@ -215,6 +216,7 @@ pub enum PreferencesResult {
     AudioCancel,
     RescanPlugins,
     AddPluginPath(std::path::PathBuf),
+    SetInlineRackPluginGui(bool),
 }
 
 impl PreferencesState {
@@ -225,6 +227,7 @@ impl PreferencesState {
         custom_plugin_paths: Vec<std::path::PathBuf>,
         current_input_ch: usize,
         current_output_ch: (usize, usize),
+        inline_rack_plugin_gui: bool,
     ) -> Self {
         Self {
             tab: PreferencesTab::Audio,
@@ -237,6 +240,7 @@ impl PreferencesState {
             ),
             custom_plugin_paths,
             scan_status: String::new(),
+            inline_rack_plugin_gui,
         }
     }
 }
@@ -642,6 +646,31 @@ fn show_plugins_tab(
     available_plugins: &[PluginInfo],
 ) -> PreferencesResult {
     let mut result = PreferencesResult::None;
+
+    let before_inline_mode = state.inline_rack_plugin_gui;
+
+    ui.label(
+        RichText::new("RACK GUI MODE")
+            .size(SZ_SECTION)
+            .color(crate::ui::theme::ACCENT),
+    );
+    ui.add_space(4.0);
+    ui.checkbox(
+        &mut state.inline_rack_plugin_gui,
+        "Inline plugin GUI inside Rack Mode",
+    );
+    ui.label(
+        RichText::new(
+            "Off: open VST GUI in a separate window. On: show the selected plugin GUI inline in the rack area.",
+        )
+        .size(SZ_SMALL)
+        .color(crate::ui::theme::TEXT_SECONDARY),
+    );
+    ui.add_space(10.0);
+
+    if state.inline_rack_plugin_gui != before_inline_mode {
+        result = PreferencesResult::SetInlineRackPluginGui(state.inline_rack_plugin_gui);
+    }
 
     ui.horizontal(|ui| {
         if ui.button("Rescan All Plugins").clicked() {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::audio::node::{SerializedGraph, SerializedNode};
+use crate::audio::node::{NodeId, SerializedGraph, SerializedNode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -19,6 +19,8 @@ pub struct Session {
 pub struct Preset {
     pub name: String,
     pub graph: SerializedGraph,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rack_order: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +36,7 @@ impl Default for Preset {
         Self {
             name: "Untitled".into(),
             graph: SerializedGraph::default(),
+            rack_order: Vec::new(),
         }
     }
 }
@@ -66,6 +69,7 @@ impl Preset {
 }
 
 impl Session {
+    #[cfg(test)]
     pub fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
@@ -88,11 +92,13 @@ impl Session {
                 self.preset = Preset {
                     name: self.name.clone(),
                     graph,
+                    rack_order: Vec::new(),
                 };
             } else if !self.chain.is_empty() {
                 self.preset = Preset {
                     name: self.name.clone(),
                     graph: Self::migrate_legacy_session(&self.chain),
+                    rack_order: Vec::new(),
                 };
                 log::info!(
                     "Migrated {} legacy chain slots to preset graph format",
@@ -254,6 +260,7 @@ mod tests {
                     },
                 ],
             },
+            rack_order: vec![NodeId(2)],
         };
 
         let dir = std::env::temp_dir().join("tonedock_test_roundtrip");
@@ -266,6 +273,7 @@ mod tests {
         assert_eq!(loaded.preset.name, "test_preset");
         assert_eq!(loaded.preset.graph.nodes.len(), 3);
         assert_eq!(loaded.preset.graph.connections.len(), 2);
+        assert_eq!(loaded.preset.rack_order, vec![NodeId(2)]);
         assert_eq!(
             loaded.preset.graph.nodes[1].plugin_state,
             Some(vec![1, 2, 3, 4])

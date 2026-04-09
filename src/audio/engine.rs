@@ -728,14 +728,6 @@ impl AudioEngine {
         self.host_id
     }
 
-    pub fn current_input_device_name(&self) -> Option<&str> {
-        self.input_device_name.as_deref()
-    }
-
-    pub fn current_output_device_name(&self) -> Option<&str> {
-        self.output_device_name.as_deref()
-    }
-
     pub fn restart_with_config(
         &mut self,
         host_id: Option<HostId>,

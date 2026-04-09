@@ -1,32 +1,47 @@
+use crate::audio::node::NodeId;
 use crate::vst_host::scanner::PluginInfo;
 use egui::*;
 
+pub struct RackSlotView {
+    pub node_id: NodeId,
+    pub name: String,
+    pub vendor: String,
+    pub category: String,
+    pub loaded: bool,
+    pub enabled: bool,
+    pub bypassed: bool,
+    pub has_editor: bool,
+    pub editor_open: bool,
+}
+
 pub enum RackCommand {
-    Select(usize),
+    Select(NodeId),
     Add(usize),
-    Remove(usize),
-    Move(usize, usize),
-    ToggleBypass(usize),
-    ToggleEnable(usize),
-    OpenEditor(usize),
-    CloseEditor(usize),
+    Remove(NodeId),
+    Reorder(NodeId, usize),
+    ToggleBypass(NodeId),
+    ToggleEnable(NodeId),
+    OpenEditor(NodeId),
+    CloseEditor(NodeId),
 }
 
 pub struct RackView {
-    pub selected_plugin: Option<usize>,
+    pub selected_plugin: Option<NodeId>,
+    dragging_plugin: Option<NodeId>,
 }
 
 impl RackView {
     pub fn new() -> Self {
         Self {
             selected_plugin: None,
+            dragging_plugin: None,
         }
     }
 
     pub fn show(
         &mut self,
         ui: &mut Ui,
-        chain_slots: &mut Vec<crate::audio::chain::PluginSlot>,
+        rack_slots: &[RackSlotView],
         available_plugins: &[PluginInfo],
     ) -> Vec<RackCommand> {
         let mut commands = Vec::new();
@@ -44,7 +59,7 @@ impl RackView {
                     if available_plugins.is_empty() {
                         ui.label(
                             RichText::new(
-                                "No plugins found.\nOpen Settings → Plugins\nto add VST3 paths.",
+                                "No plugins found.\nOpen Settings -> Plugins\nto add VST3 paths.",
                             )
                             .size(10.0)
                             .color(crate::ui::theme::TEXT_SECONDARY),
@@ -61,11 +76,10 @@ impl RackView {
 
             ui.add_space(6.0);
 
-            let mut remove_idx = None;
-            let mut move_from_to: Option<(usize, usize)> = None;
-            let slots_count = chain_slots.len();
+            let slots_count = rack_slots.len();
+            let mut slot_rects: Vec<(NodeId, Rect)> = Vec::with_capacity(slots_count);
 
-            for (i, slot) in chain_slots.iter_mut().enumerate() {
+            for (i, slot) in rack_slots.iter().enumerate() {
                 let bg = if !slot.enabled {
                     crate::ui::theme::DISABLED
                 } else if slot.bypassed {
@@ -74,8 +88,7 @@ impl RackView {
                     crate::ui::theme::SURFACE_CONTAINER_HIGH
                 };
 
-                let is_selected = self.selected_plugin == Some(i);
-
+                let is_selected = self.selected_plugin == Some(slot.node_id);
                 let border_color = if is_selected {
                     crate::ui::theme::ACCENT
                 } else {
@@ -99,6 +112,12 @@ impl RackView {
 
                 let response = frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        let grip =
+                            ui.add(Label::new(RichText::new("≡").size(18.0)).sense(Sense::drag()));
+                        if grip.drag_started() {
+                            self.dragging_plugin = Some(slot.node_id);
+                        }
+
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
                                 let led = if !slot.enabled {
@@ -117,19 +136,18 @@ impl RackView {
                                     Color32::from_rgba_unmultiplied(led.r(), led.g(), led.b(), 30),
                                 );
                                 ui.label(
-                                    RichText::new(&slot.info.name)
+                                    RichText::new(&slot.name)
                                         .size(14.0)
                                         .strong()
                                         .color(crate::ui::theme::TEXT_PRIMARY),
                                 );
                             });
-                            let vendor = &slot.info.vendor;
-                            let category = &slot.info.category;
-                            if !vendor.is_empty() || !category.is_empty() {
-                                let detail = if !vendor.is_empty() && !category.is_empty() {
-                                    format!("{} / {}", vendor, category)
+                            if !slot.vendor.is_empty() || !slot.category.is_empty() {
+                                let detail = if !slot.vendor.is_empty() && !slot.category.is_empty()
+                                {
+                                    format!("{} / {}", slot.vendor, slot.category)
                                 } else {
-                                    format!("{}{}", vendor, category)
+                                    format!("{}{}", slot.vendor, slot.category)
                                 };
                                 ui.label(
                                     RichText::new(detail)
@@ -137,7 +155,7 @@ impl RackView {
                                         .color(crate::ui::theme::TEXT_SECONDARY),
                                 );
                             }
-                            if let Some(ref _instance) = slot.instance {
+                            if slot.loaded {
                                 ui.label(
                                     RichText::new("Loaded")
                                         .size(9.0)
@@ -154,36 +172,24 @@ impl RackView {
 
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui.button(RichText::new("X").size(11.0)).clicked() {
-                                remove_idx = Some(i);
-                            }
-                            if i > 0 && ui.button(RichText::new("Up").size(11.0)).clicked() {
-                                move_from_to = Some((i, i - 1));
-                            }
-                            if i < slots_count - 1
-                                && ui.button(RichText::new("Down").size(11.0)).clicked()
-                            {
-                                move_from_to = Some((i, i + 1));
+                                commands.push(RackCommand::Remove(slot.node_id));
                             }
                             let bypass_text = if slot.bypassed { "Unbypass" } else { "Bypass" };
                             if ui.button(RichText::new(bypass_text).size(11.0)).clicked() {
-                                commands.push(RackCommand::ToggleBypass(i));
+                                commands.push(RackCommand::ToggleBypass(slot.node_id));
                             }
                             let enable_text = if slot.enabled { "Disable" } else { "Enable" };
                             if ui.button(RichText::new(enable_text).size(11.0)).clicked() {
-                                commands.push(RackCommand::ToggleEnable(i));
+                                commands.push(RackCommand::ToggleEnable(slot.node_id));
                             }
 
-                            if let Some(ref instance) = slot.instance {
-                                if instance.has_editor() {
-                                    if slot.editor.is_open() {
-                                        if ui.button("Close GUI").clicked() {
-                                            commands.push(RackCommand::CloseEditor(i));
-                                        }
-                                    } else {
-                                        if ui.button("Open GUI").clicked() {
-                                            commands.push(RackCommand::OpenEditor(i));
-                                        }
+                            if slot.has_editor {
+                                if slot.editor_open {
+                                    if ui.button("Close GUI").clicked() {
+                                        commands.push(RackCommand::CloseEditor(slot.node_id));
                                     }
+                                } else if ui.button("Open GUI").clicked() {
+                                    commands.push(RackCommand::OpenEditor(slot.node_id));
                                 }
                             }
                         });
@@ -200,9 +206,10 @@ impl RackView {
                 });
 
                 if response.response.clicked() {
-                    self.selected_plugin = Some(i);
-                    commands.push(RackCommand::Select(i));
+                    self.selected_plugin = Some(slot.node_id);
+                    commands.push(RackCommand::Select(slot.node_id));
                 }
+                slot_rects.push((slot.node_id, response.response.rect));
 
                 if i < slots_count - 1 {
                     ui.vertical_centered(|ui| {
@@ -217,7 +224,37 @@ impl RackView {
                 }
             }
 
-            if chain_slots.is_empty() {
+            if let Some(dragged_node) = self.dragging_plugin {
+                if let Some(pointer_pos) = ui.ctx().pointer_latest_pos() {
+                    if let Some((_, rect)) = slot_rects
+                        .iter()
+                        .find(|(_, rect)| rect.contains(pointer_pos))
+                    {
+                        ui.painter().rect_stroke(
+                            rect.expand(4.0),
+                            CornerRadius::same(16),
+                            Stroke::new(2.0, crate::ui::theme::ACCENT),
+                            StrokeKind::Outside,
+                        );
+                    }
+                }
+
+                let released = ui.input(|i| i.pointer.any_released());
+                if released {
+                    if let Some(pointer_pos) = ui.ctx().pointer_latest_pos() {
+                        if let Some((target_index, _)) = slot_rects
+                            .iter()
+                            .enumerate()
+                            .find(|(_, (_, rect))| rect.contains(pointer_pos))
+                        {
+                            commands.push(RackCommand::Reorder(dragged_node, target_index));
+                        }
+                    }
+                    self.dragging_plugin = None;
+                }
+            }
+
+            if rack_slots.is_empty() {
                 Frame::group(ui.style())
                     .fill(crate::ui::theme::SURFACE_CONTAINER)
                     .corner_radius(CornerRadius::same(18))
@@ -225,27 +262,18 @@ impl RackView {
                     .show(ui, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.label(
-                                RichText::new("No plugins loaded")
+                                RichText::new("No rack plugins")
                                     .size(16.0)
                                     .color(crate::ui::theme::TEXT_SECONDARY),
                             );
                             ui.add_space(4.0);
                             ui.label(
-                                RichText::new(
-                                    "Load plugins to build a hardware-style digital rack",
-                                )
-                                .size(10.0)
-                                .color(crate::ui::theme::TEXT_HINT),
+                                RichText::new("Load plugins to build the main serial rack chain")
+                                    .size(10.0)
+                                    .color(crate::ui::theme::TEXT_HINT),
                             );
                         });
                     });
-            }
-
-            if let Some(idx) = remove_idx {
-                commands.push(RackCommand::Remove(idx));
-            }
-            if let Some((from, to)) = move_from_to {
-                commands.push(RackCommand::Move(from, to));
             }
         });
 

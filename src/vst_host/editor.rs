@@ -382,6 +382,8 @@ pub struct PluginEditor {
     window_hwnd: Option<HWND>,
     is_open: bool,
     mode: EditorMode,
+    owns_window: bool,
+    preferred_size: (i32, i32),
 }
 
 impl PluginEditor {
@@ -394,6 +396,8 @@ impl PluginEditor {
             window_hwnd: None,
             is_open: false,
             mode: EditorMode::SeparateWindow,
+            owns_window: false,
+            preferred_size: (600, 400),
         }
     }
 
@@ -411,6 +415,66 @@ impl PluginEditor {
         )
     }
 
+    pub fn open_embedded_window(
+        &mut self,
+        edit_controller: &ComPtr<IEditController>,
+        plugin_name: &str,
+        parent_hwnd: *mut c_void,
+        bounds: (i32, i32, i32, i32),
+    ) -> anyhow::Result<()> {
+        if self.is_open {
+            self.close();
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let parent_hwnd = parent_hwnd as HWND;
+            let hwnd =
+                self.create_embedded_window(parent_hwnd, bounds.0, bounds.1, bounds.2, bounds.3)?;
+            self.window_hwnd = Some(hwnd);
+            self.owns_window = true;
+            let result = self.open_internal(
+                edit_controller,
+                Some(hwnd as *mut c_void),
+                EditorMode::Embedded,
+                plugin_name,
+            );
+            if result.is_err() {
+                self.close();
+            }
+            return result;
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (edit_controller, plugin_name, parent_hwnd, bounds);
+            Err(anyhow::anyhow!(
+                "Embedded editor not supported on this platform"
+            ))
+        }
+    }
+
+    pub fn set_embedded_bounds(&mut self, bounds: (i32, i32, i32, i32)) {
+        #[cfg(target_os = "windows")]
+        {
+            if self.mode == EditorMode::Embedded {
+                if let Some(hwnd) = self.window_hwnd {
+                    unsafe {
+                        MoveWindow(hwnd, bounds.0, bounds.1, bounds.2, bounds.3, 1);
+                        ShowWindow(hwnd, SW_SHOW);
+                        UpdateWindow(hwnd);
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = bounds;
+    }
+
+    pub fn preferred_size(&self) -> (i32, i32) {
+        self.preferred_size
+    }
+
     fn open_internal(
         &mut self,
         edit_controller: &ComPtr<IEditController>,
@@ -422,6 +486,7 @@ impl PluginEditor {
             self.close();
         }
         self.mode = mode;
+        self.owns_window = mode == EditorMode::SeparateWindow;
 
         #[cfg(target_os = "windows")]
         {
@@ -463,6 +528,7 @@ impl PluginEditor {
         }
 
         let (w, h) = Self::query_view_size(&plug_view).unwrap_or((600, 400));
+        self.preferred_size = (w, h);
         log::info!("open_internal: initial view size {}x{}", w, h);
 
         let frame_ptr = create_host_plug_frame();
@@ -652,6 +718,9 @@ impl PluginEditor {
                 let parent = parent_hwnd.unwrap_or(std::ptr::null_mut());
                 #[cfg(target_os = "windows")]
                 {
+                    if !parent.is_null() {
+                        set_frame_hwnd(frame_ptr, parent as HWND);
+                    }
                     let result = plug_view_attached_seh(&plug_view, parent, K_PLATFORM_TYPE_HWND);
                     if result != kResultOk {
                         let _ = plug_view_removed_seh(&plug_view);
@@ -702,7 +771,7 @@ impl PluginEditor {
         #[cfg(target_os = "windows")]
         {
             if let Some(hwnd) = self.window_hwnd.take() {
-                if window_valid {
+                if window_valid && self.owns_window {
                     unsafe {
                         DestroyWindow(hwnd);
                     }
@@ -712,6 +781,7 @@ impl PluginEditor {
         release_host_plug_frame(self.plug_frame);
         self.plug_frame = std::ptr::null_mut();
         self.is_open = false;
+        self.owns_window = false;
     }
 
     pub fn is_open(&self) -> bool {
@@ -784,6 +854,39 @@ impl PluginEditor {
         };
         if hwnd == 0 {
             return Err(anyhow::anyhow!("CreateWindowExW failed"));
+        }
+        Ok(hwnd)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn create_embedded_window(
+        &self,
+        parent_hwnd: HWND,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> anyhow::Result<HWND> {
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                get_editor_class_name().as_ptr(),
+                std::ptr::null(),
+                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                x,
+                y,
+                width,
+                height,
+                parent_hwnd,
+                0,
+                get_module_handle(),
+                std::ptr::null_mut(),
+            )
+        };
+        if hwnd == 0 {
+            return Err(anyhow::anyhow!(
+                "CreateWindowExW failed for embedded editor"
+            ));
         }
         Ok(hwnd)
     }
