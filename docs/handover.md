@@ -1,6 +1,6 @@
 # ToneDock — Handover資料
 
-最終更新: 2026-04-07 08:53 JST
+最終更新: 2026-04-09 23:00 JST
 
 ## プロジェクト概要
 
@@ -16,7 +16,14 @@
 ```
 src/
 ├── main.rs              — エントリポイント（eframe）
-├── app.rs               — メインGUIアプリ
+├── app/
+│   ├── mod.rs           — ToneDockApp 構造体, 初期化, プラグインスキャン
+│   ├── commands.rs      — EdCmd 処理（ノード操作, Undo/Redo）
+│   ├── rack.rs          — グラフ↔ラック同期, シグナルチェーン構築
+│   ├── rack_view.rs     — Rack/Node Editor UI 描画, VST パラメータパネル
+│   ├── session.rs       — プリセット保存/読込, トランスポート状態同期
+│   ├── templates.rs     — ルーティングテンプレート適用
+│   └── toolbar.rs       — ツールバー, トランスポート, ショートカット, 設定ダイアログ
 ├── metronome.rs          — メトロノーム生成（スタンドアローン）
 ├── looper.rs             — ルーパー（スタンドアローン）
 ├── session.rs            — セッションJSON保存/復元
@@ -40,7 +47,12 @@ src/
 └── vst_host/
     ├── mod.rs
     ├── scanner.rs          — VST3プラグインスキャナー
-    └── plugin.rs           — VST3 COM経由プラグインローダー
+    ├── plugin.rs           — VST3 COM経由プラグインローダー
+    ├── editor/
+    │   ├── mod.rs          — PluginEditor 本体 (open/close/lifecycle, separate/embedded)
+    │   ├── host_frame.rs   — IPlugFrame COM 実装 (resize_view)
+    │   └── win32.rs        — Win32 ウィンドウ管理, SEH ラッパー
+    └── seh_wrapper.c       — プラグイン呼び出しの SEH 保護
 ```
 
 ## ノードベースルーティング実装状況
@@ -161,14 +173,14 @@ src/
 **src/audio/node.rs 変更点**:
 - `NodeId` に `Ord, PartialOrd` derive を追加（`max()` 用于意）
 
-**src/app.rs 変更点**:
-- `ViewMode` enum 追加（Rack / NodeEditor）
-- `ToneDockApp` に `view_mode`, `node_editor` フィールド追加
-- ツールバーに「Node Editor」/「Rack View」切替ボタン追加
-- CentralPanel を ViewMode に応じて切替:
-  - `show_rack_view()` — 従来のラックビュー（リファクタリング）
-  - `show_node_editor()` — ノードエディタ＋サイドメーター
-- `process_editor_commands()` — EdCmd をエンジンメソッド呼び出しに変換
+**src/app/ 変更点**:
+- `ViewMode` enum 追加（Rack / NodeEditor）（`app/mod.rs`）
+- `ToneDockApp` に `view_mode`, `node_editor` フィールド追加（`app/mod.rs`）
+- ツールバーに「Node Editor」/「Rack View」切替ボタン追加（`app/toolbar.rs`）
+- CentralPanel を ViewMode に応じて切替（`app/toolbar.rs`）:
+  - `show_rack_view()` — 従来のラックビュー（リファクタリング）（`app/rack_view.rs`）
+  - `show_node_editor()` — ノードエディタ＋サイドメーター（`app/rack_view.rs`）
+- `process_editor_commands()` — EdCmd をエンジンメソッド呼び出しに変換（`app/commands.rs`）
 
 **src/audio/graph.rs 変更点**:
 - `GraphNode` に `looper_buffer: Mutex<Option<LooperBuffer>>` フィールドを追加
@@ -190,7 +202,7 @@ src/
 - `add_metronome_node()` / `add_looper_node()` — グラフにノードを追加しIDをキャッシュ
 - `apply_command()` — `LooperNodeState.cleared == true` の場合 `clear_looper()` を呼び出し
 
-**src/app.rs 変更点**:
+**src/app/ 変更点**:
 - UI制御をスタンドアローン `Metronome`/`Looper` からグラフノード経由に完全移行
 - メトロノーム: `graph_set_state()` で BPM/Volume を `MetronomeNodeState` に設定
 - ルーパー: `graph_set_state()` で enabled/recording/playing/overdubbing/cleared を制御
@@ -243,7 +255,7 @@ src/
 - **ステータスバー更新**:
   - `F: fit  Ctrl+D: duplicate` を追加
 
-**src/app.rs 変更点**:
+**src/app/commands.rs 変更点**:
 - `process_editor_commands()` に3つの新コマンドハンドラ追加:
   - `EdCmd::Disconnect` — `graph_disconnect()` 呼び出し
   - `EdCmd::SetState` — `graph_set_state()` 呼び出し
@@ -279,15 +291,15 @@ src/
   - `plugin.get_parameter()` を返す
 - 新依存インポート: `LoadedPlugin`, `PluginInfo`
 
-**src/app.rs 変更点**:
+**src/app/ 変更点**:
 
-- **`show_node_editor()`**:
+- **`show_node_editor()`**（`rack_view.rs`）:
   - `node_editor.show()` に `available_plugins` を渡すよう変更
   - サイドパネルに `draw_vst_parameter_panel()` を追加（選択ノードがVSTの場合）
-- **`process_editor_commands()`** に2つの新コマンドハンドラ追加:
+- **`process_editor_commands()`**（`commands.rs`）に2つの新コマンドハンドラ追加:
   - `EdCmd::AddVstNode` — NodeType::VstPlugin ノード追加 → `load_vst_plugin_to_node()` でプラグインロード
   - `EdCmd::SetVstParameter` — `set_vst_node_parameter()` 呼び出し
-- **`draw_vst_parameter_panel()`** 新規メソッド:
+- **`draw_vst_parameter_panel()`** 新規メソッド（`rack_view.rs`）:
   - 選択ノードがVSTプラグインの場合、サイドパネルにパラメータノブを表示
   - プラグイン未ロード時は「Plugin not loaded」表示
   - ノブサイズ44px、3列レイアウトでパラメータ一覧表示
@@ -301,7 +313,7 @@ src/
 - `migrate_legacy_session()` — 旧 `Vec<ChainSlot>` → `SerializedGraph` に変換
 - `load_from_file()` — 読み込み時に `graph` が `None` で `chain` が非空の場合、自動マイグレーション
 
-**src/app.rs**:
+**src/app/session.rs**:
 - `build_session()` — 現在の AudioGraph から SerializedGraph を生成して保存
 - `load_session()` — 読み込み後に `load_serialized_graph()` でグラフを復元
 
@@ -325,14 +337,14 @@ src/
 - コンテキストメニューに "Templates" セクション追加（5種類のテンプレート）
 - パラメータバーに Wet/Dry と Send の表示・ドラッグ編集対応
 
-**src/app.rs**:
+**src/app/templates.rs**:
 - `apply_template()` — 5種類のルーティングテンプレート:
   - `wide_stereo_amp` — Splitter→2x Pan→Mixer
   - `dry_wet_blend` — Splitter→WetDry→Mixer
   - `mono_stereo_reverb` — ChannelConverter(M→S)→Output
   - `send_return_reverb` — SendBus→ReturnBus→Mixer
   - `parallel_chain` — Splitter→2x Gain→Mixer
-- `process_editor_commands()` に `EdCmd::ApplyTemplate` ハンドラ追加
+- `process_editor_commands()` に `EdCmd::ApplyTemplate` ハンドラ追加（`commands.rs`）
 
 ### Phase 5: Undo/Redo ✅ 完了
 
@@ -361,7 +373,7 @@ src/
 - `execute_undo_actions(actions)` — undoアクションをグラフに適用:
   - clone → アクション適用 → commit_topology → store
   - `RemovedNode` は add_node_with_id + 位置・状態・接続復元
-  - アクションリストは**逆順**で実行（app.rs側で制御）
+  - アクションリストは**逆順**で実行（`app/commands.rs` 側で制御）
 - `execute_redo_actions(actions)` — redoアクションをグラフに適用:
   - 同じclone → 適用 → commit → store パターン
   - `AddedNode` は add_node_with_id + 位置設定
@@ -369,9 +381,9 @@ src/
 **src/audio/node.rs 変更点**:
 - `NodeType`, `NodeInternalState`, `Connection`, `MetronomeNodeState`, `LooperNodeState` に `PartialEq` derive を追加（テスト比較用）
 
-**src/app.rs 変更点**:
-- `ToneDockApp` に `undo_manager: UndoManager` フィールド追加
-- `process_editor_commands()` — 各EdCmd実行前に「前状態」をキャプチャ:
+**src/app/ 変更点**:
+- `ToneDockApp` に `undo_manager: UndoManager` フィールド追加（`mod.rs`）
+- `process_editor_commands()`（`commands.rs`）— 各EdCmd実行前に「前状態」をキャプチャ:
   - `AddNode` → `AddedNode` アクション記録
   - `RemoveNode` → `RemovedNode`（タイプ、位置、状態、全接続を保存）
   - `Connect` → `Connected`
@@ -403,6 +415,54 @@ src/
 - `test_continuous_coalescing` — パラメータドラッグの自動マージ
 - `test_continuous_no_coalesce_different_node` — 異ノード間の非マージ
 - `test_clear` — UndoManagerクリア
+
+### Phase 6: モジュール分割 ✅ 完了
+
+`src/app.rs`（2343行）と `src/vst_host/editor.rs`（953行）をディレクトリに分割。
+
+**src/app/ 分割**:
+- `mod.rs` — `ToneDockApp` 構造体定義、`new()`、`scan_plugins()`、`start_audio()`
+- `commands.rs` — `process_editor_commands()`、`perform_undo()`、`perform_redo()`
+- `rack.rs` — グラフ↔ラック同期、シグナルチェーン構築、エディタ open/close
+- `rack_view.rs` — `show_rack_view()`、`show_node_editor()`、`draw_vst_parameter_panel()`、inline GUI
+- `session.rs` — `save_preset()`、`load_preset()`、`build_preset()`、`import_session()`、`sync_transport_state_from_graph()`、`open_preferences()`
+- `templates.rs` — `apply_template()`（5種類のルーティングテンプレート）
+- `toolbar.rs` — `impl App for ToneDockApp`、ツールバー・トランスポート描画、ショートカット、設定ダイアログ、About
+
+**src/vst_host/editor/ 分割**:
+- `mod.rs` — `PluginEditor` 本体（open/close/lifecycle、separate/embedded 両モード、smoke test）
+- `host_frame.rs` — `IPlugFrame` COM 実装（`resize_view`、HWND 管理）
+- `win32.rs` — Win32 ウィンドウ管理（ウィンドウクラス登録、メッセージポンプ、SEH ラッパー関数）
+
+### Phase 7: Inline VST GUI ✅ 完了
+
+**機能概要**:
+- Settings の `Inline plugin GUI inside Rack Mode` で Rack 内埋め込み表示に切り替えられる
+- 埋め込みに失敗した場合は自動的に separate window にフォールバック
+- フォールバック時は status message で通知（例: `Inline GUI failed, opened separate window: <plugin>`）
+- close/reopen を含む状態整合を保証（`inline_rack_editor_node` と `rack_plugin_editors` の整合）
+
+**src/app/rack_view.rs**:
+- `ensure_inline_rack_editor()` — inline GUI のオープンとフォールバック処理
+  - `open_embedded_window()` 失敗時 → `open_separate_window()` を自動試行
+  - 二重管理なし（同一 `PluginEditor` インスタンスでembedded→separate切替）
+- Rack View 内に inline GUI パネル領域（320-520px高さ、preferred_size ベース）
+
+**src/vst_host/editor/mod.rs**:
+- `EditorMode::SeparateWindow` / `EditorMode::Embedded`
+- `open_embedded_window()` — child HWND 生成 → embedded attach
+- `open_separate_window()` — owner window + child HWND → separate attach
+- `set_embedded_bounds()` — embedded モードのリサイズ
+
+**smoke test**:
+- `smoke_open_plugin_editor` — separate window の open/close 確認
+- `smoke_open_plugin_editor_embedded` — embedded の open/close/reopen 確認
+
+```powershell
+$env:TEST_VST_EDITOR_PATH='C:\Program Files\Common Files\VST3\NeuralAmpModeler.vst3'
+cargo test smoke_open_plugin_editor -- --ignored --nocapture
+cargo test smoke_open_plugin_editor_embedded -- --ignored --nocapture
+```
 
 ## 次にやること
 

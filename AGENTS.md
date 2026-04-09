@@ -24,7 +24,14 @@ cargo test smoke_open_plugin_editor -- --ignored --nocapture
 ```text
 src/
 |- main.rs            eframe エントリポイント
-|- app.rs             ToneDockApp (GUI, ViewMode 切替, Undo/Redo, テンプレート)
+|- app/
+|  |- mod.rs          ToneDockApp 構造体, 初期化, プラグインスキャン
+|  |- commands.rs     EdCmd 処理 (ノード操作, Undo/Redo)
+|  |- rack.rs         グラフ↔ラック同期, シグナルチェーン構築
+|  |- rack_view.rs    Rack/Node Editor UI 描画, VST パラメータパネル
+|  |- session.rs      プリセット保存/読込, トランスポート状態同期
+|  |- templates.rs    ルーティングテンプレート適用
+|  `- toolbar.rs      ツールバー, トランスポート, ショートカット, 設定ダイアログ
 |- metronome.rs       旧スタンドアローンメトロノーム
 |- looper.rs          旧スタンドアローンルーパー
 |- session.rs         JSON セッション保存/復元 + 旧フォーマット移行
@@ -48,7 +55,10 @@ src/
    |- mod.rs
    |- scanner.rs      VST3 プラグインスキャナー
    |- plugin.rs       VST3 ローダー / processor-controller 初期化 / host objects
-   |- editor.rs       VST3 editor hosting
+   |- editor/
+   |  |- mod.rs       PluginEditor 本体 (open/close/lifecycle)
+   |  |- host_frame.rs IPlugFrame COM 実装 (resize_view)
+   |  `- win32.rs      Win32 ウィンドウ管理, SEH ラッパー
    `- seh_wrapper.c   プラグイン呼び出しの SEH 保護
 ```
 
@@ -116,7 +126,7 @@ src/
 
 ### Undo/Redo
 
-- `UndoManager` は `app.rs` 内で管理する
+- `UndoManager` は `app/mod.rs` 内で管理する
 - 連続ドラッグは同一ノードなら自動マージされる
 - VST プラグインロードの undo は未対応
 
