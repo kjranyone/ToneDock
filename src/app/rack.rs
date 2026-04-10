@@ -252,6 +252,11 @@ impl ToneDockApp {
                         .rack_plugin_editors
                         .get(node_id)
                         .is_some_and(|editor: &PluginEditor| editor.is_open()),
+                    preferred_editor_size: self
+                        .rack_plugin_editors
+                        .get(node_id)
+                        .map(|editor| editor.preferred_size())
+                        .unwrap_or((600, 400)),
                 })
             })
             .collect()

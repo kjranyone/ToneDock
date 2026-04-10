@@ -9,7 +9,7 @@ description = "A guitar practice VST3 host application"
 vst3 = "0.3"
 cpal = { version = "0.15", features = ["asio"] }
 asio-sys = "0.2"
-eframe = "0.31"
+eframe = { version = "0.31", features = ["persistence"] }
 egui = "0.31"
 egui_extras = "0.31"
 serde = { version = "1", features = ["derive"] }

@@ -133,6 +133,7 @@ impl ToneDockApp {
     pub(crate) fn show_rack_view(&mut self, ui: &mut Ui) {
         let screen_size = ui.ctx().screen_rect().size();
         let side_width = 280.0;
+        let full_height = ui.available_height();
         crate::ui::theme::paint_panel_texture(ui.painter(), ui.max_rect());
         crate::ui::theme::paint_rack_bay(ui.painter(), ui.max_rect().shrink2(vec2(12.0, 12.0)));
 
@@ -149,6 +150,7 @@ impl ToneDockApp {
                     ))
                     .inner_margin(18.0)
                     .show(ui, |ui| {
+                        ui.set_min_height(full_height - 36.0);
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new("DIGITAL RACK")
@@ -171,7 +173,15 @@ impl ToneDockApp {
 
                         let available = self.available_plugins.clone();
                         let rack_slots = self.build_rack_slots();
-                        let commands = self.rack_view.show(ui, &rack_slots, &available);
+                        let inline_node = self
+                            .inline_rack_editor_node
+                            .filter(|node_id| self.rack_order.contains(node_id));
+                        let (commands, inline_rects) =
+                            self.rack_view.show(ui, &rack_slots, &available, inline_node);
+
+                        for (node_id, rect) in &inline_rects {
+                            self.ensure_inline_rack_editor(ui, *node_id, *rect);
+                        }
 
                         for cmd in commands {
                             match cmd {
@@ -234,66 +244,6 @@ impl ToneDockApp {
                             }
                         }
 
-                        if self.inline_rack_plugin_gui {
-                            ui.add_space(12.0);
-                            let inline_node = self
-                                .inline_rack_editor_node
-                                .filter(|node_id| self.rack_order.contains(node_id));
-
-                            Frame::group(ui.style())
-                                .fill(crate::ui::theme::BG_PANEL)
-                                .inner_margin(10.0)
-                                .corner_radius(CornerRadius::same(14))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new("INLINE GUI")
-                                                .size(10.0)
-                                                .color(crate::ui::theme::ACCENT)
-                                                .strong(),
-                                        );
-                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                            if inline_node.is_some()
-                                                && ui.small_button("Close").clicked()
-                                            {
-                                                if let Some(node_id) = inline_node {
-                                                    self.close_rack_editor(node_id);
-                                                }
-                                            }
-                                        });
-                                    });
-                                    ui.add_space(6.0);
-
-                                    if let Some(node_id) = inline_node {
-                                        let preferred_size = self
-                                            .rack_plugin_editors
-                                            .get(&node_id)
-                                            .map(|editor| editor.preferred_size())
-                                            .unwrap_or((720, 420));
-                                        let available_width = ui.available_width().max(320.0);
-                                        let height = (preferred_size.1 as f32 / ui.ctx().pixels_per_point())
-                                            .clamp(220.0, 520.0);
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            vec2(available_width, height),
-                                            Sense::hover(),
-                                        );
-                                        ui.painter().rect_filled(
-                                            rect,
-                                            CornerRadius::same(10),
-                                            Color32::from_rgb(10, 10, 12),
-                                        );
-                                        self.ensure_inline_rack_editor(ui, node_id, rect);
-                                    } else {
-                                        ui.label(
-                                            RichText::new(
-                                                "Open GUI on a rack plugin to show it inline here.",
-                                            )
-                                            .size(10.0)
-                                            .color(crate::ui::theme::TEXT_SECONDARY),
-                                        );
-                                    }
-                                });
-                        }
                     });
             });
 
@@ -309,6 +259,7 @@ impl ToneDockApp {
                     ))
                     .inner_margin(14.0)
                     .show(ui, |ui| {
+                        ui.set_min_height(full_height - 28.0);
                         ui.label(
                             RichText::new("RACK CONTROL")
                                 .size(11.0)
@@ -398,6 +349,7 @@ impl ToneDockApp {
         let side_width = 280.0;
         let screen_size = ui.ctx().screen_rect().size();
         let full_w = screen_size.x - side_width - 30.0;
+        let full_height = ui.available_height();
         crate::ui::theme::paint_panel_texture(ui.painter(), ui.max_rect());
 
         ui.horizontal(|ui| {
@@ -412,6 +364,7 @@ impl ToneDockApp {
                     ))
                     .inner_margin(8.0)
                     .show(ui, |ui| {
+                        ui.set_min_height(full_height - 16.0);
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new("SIGNAL FLOW")
@@ -446,6 +399,7 @@ impl ToneDockApp {
                     ))
                     .inner_margin(14.0)
                     .show(ui, |ui| {
+                        ui.set_min_height(full_height - 28.0);
                         ui.label(
                             RichText::new("NODE INSPECTOR")
                                 .size(11.0)
