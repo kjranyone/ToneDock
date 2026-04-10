@@ -18,8 +18,6 @@ use crate::audio::chain::Chain;
 use crate::audio::graph::AudioGraph;
 use crate::audio::graph_command::GraphCommand;
 use crate::audio::node::{Connection, NodeId, NodeType, PortId};
-use crate::looper::Looper;
-use crate::metronome::Metronome;
 
 pub use device::enumerate_hosts;
 
@@ -53,8 +51,6 @@ pub struct AudioEngine {
     pub buffer_size: u32,
     pub chain: Arc<Mutex<Chain>>,
     pub graph: Arc<ArcSwap<AudioGraph>>,
-    pub metronome: Arc<Mutex<Metronome>>,
-    pub looper: Arc<Mutex<Looper>>,
     pub master_volume: Arc<Mutex<f32>>,
     pub input_gain: Arc<Mutex<f32>>,
     pub output_level: Arc<Mutex<(f32, f32)>>,
@@ -63,10 +59,10 @@ pub struct AudioEngine {
     pub output_channels: (usize, usize),
     #[allow(dead_code)]
     pub chain_node_ids: Vec<NodeId>,
-    #[allow(dead_code)]
     pub input_node_id: NodeId,
     #[allow(dead_code)]
     pub output_node_id: NodeId,
+    pub master_mixer_id: NodeId,
 
     pub metronome_node_id: Option<NodeId>,
     pub looper_node_id: Option<NodeId>,
@@ -117,16 +113,54 @@ impl AudioEngine {
             .map(|r| r.channels() as usize)
             .unwrap_or(0);
 
-        let num_channels = out_channels.max(in_channels).max(2);
-
         let mut graph = AudioGraph::new(sample_rate, buffer_size as usize);
         let input_id = graph.add_node(NodeType::AudioInput).unwrap();
+        let master_mixer_id = graph.add_node(NodeType::Mixer { inputs: 1 }).unwrap();
         let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
+        let metronome_id = graph.add_node(NodeType::Metronome).unwrap();
+        let looper_id = graph.add_node(NodeType::Looper).unwrap();
+
         graph.set_node_position(input_id, 0.0, 100.0);
-        graph.set_node_position(output_id, 400.0, 100.0);
+        graph.set_node_position(master_mixer_id, 300.0, 100.0);
+        graph.set_node_position(output_id, 500.0, 100.0);
+        graph.set_node_position(metronome_id, 100.0, 250.0);
+        graph.set_node_position(looper_id, 100.0, 350.0);
+
         graph
             .connect(Connection {
                 source_node: input_id,
+                source_port: PortId(0),
+                target_node: master_mixer_id,
+                target_port: PortId(0),
+            })
+            .unwrap();
+        graph
+            .connect(Connection {
+                source_node: input_id,
+                source_port: PortId(0),
+                target_node: looper_id,
+                target_port: PortId(0),
+            })
+            .unwrap();
+        graph
+            .connect(Connection {
+                source_node: metronome_id,
+                source_port: PortId(0),
+                target_node: master_mixer_id,
+                target_port: PortId(1),
+            })
+            .unwrap();
+        graph
+            .connect(Connection {
+                source_node: looper_id,
+                source_port: PortId(0),
+                target_node: master_mixer_id,
+                target_port: PortId(2),
+            })
+            .unwrap();
+        graph
+            .connect(Connection {
+                source_node: master_mixer_id,
                 source_port: PortId(0),
                 target_node: output_id,
                 target_port: PortId(0),
@@ -142,8 +176,6 @@ impl AudioEngine {
             buffer_size,
             chain: Arc::new(Mutex::new(Chain::new())),
             graph: Arc::new(ArcSwap::from_pointee(graph)),
-            metronome: Arc::new(Mutex::new(Metronome::new(sample_rate))),
-            looper: Arc::new(Mutex::new(Looper::new(num_channels, sample_rate))),
             master_volume: Arc::new(Mutex::new(0.8)),
             input_gain: Arc::new(Mutex::new(1.0)),
             output_level: Arc::new(Mutex::new((0.0, 0.0))),
@@ -162,8 +194,9 @@ impl AudioEngine {
             chain_node_ids: Vec::new(),
             input_node_id: input_id,
             output_node_id: output_id,
-            metronome_node_id: None,
-            looper_node_id: None,
+            master_mixer_id,
+            metronome_node_id: Some(metronome_id),
+            looper_node_id: Some(looper_id),
         })
     }
 
@@ -198,14 +231,6 @@ impl AudioEngine {
         self.sample_rate = actual_sample_rate;
         self.buffer_size = actual_buffer_size;
         {
-            let mut met = self.metronome.lock();
-            met.set_sample_rate(actual_sample_rate);
-        }
-        {
-            let mut lpr = self.looper.lock();
-            lpr.set_config(out_ch_count.max(2), actual_sample_rate);
-        }
-        {
             let guard = self.graph.load();
             let staging = (**guard).clone();
             drop(guard);
@@ -219,8 +244,6 @@ impl AudioEngine {
         let cmd_rx = self.command_rx.clone();
 
         let graph = self.graph.clone();
-        let metronome = self.metronome.clone();
-        let looper = self.looper.clone();
         let master_volume = self.master_volume.clone();
         let input_gain = self.input_gain.clone();
         let output_level = self.output_level.clone();
@@ -326,20 +349,6 @@ impl AudioEngine {
                     let guard = graph.load();
                     let input = vec![input_mono];
                     output_stereo = guard.process(&input, num_frames);
-                }
-
-                {
-                    let mut met = metronome.lock();
-                    let mut slices: Vec<&mut [f32]> =
-                        output_stereo.iter_mut().map(|v| &mut v[..]).collect();
-                    met.process(&mut slices, num_frames);
-                }
-
-                {
-                    let mut lpr = looper.lock();
-                    let mut slices: Vec<&mut [f32]> =
-                        output_stereo.iter_mut().map(|v| &mut v[..]).collect();
-                    lpr.process(&mut slices, num_frames);
                 }
 
                 let vol = *master_volume.lock();

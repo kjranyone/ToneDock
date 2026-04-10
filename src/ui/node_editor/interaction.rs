@@ -63,6 +63,36 @@ impl NodeEditor {
                         from,
                         to: ms,
                     });
+                } else if let Some((target_nid, target_pid)) =
+                    self.hit_in_port(nodes, ms, &vpos)
+                {
+                    if let Some(conn) = conns
+                        .iter()
+                        .find(|c| c.target_node == target_nid && c.target_port == target_pid)
+                    {
+                        let src_pidx = nodes
+                            .iter()
+                            .find(|n| n.id == conn.source_node)
+                            .and_then(|n| {
+                                n.outputs.iter().position(|p| p.id == conn.source_port)
+                            });
+                        if let Some(pidx) = src_pidx {
+                            let from = self.out_spos(vpos[&conn.source_node], pidx);
+                            cmds.push(EdCmd::Disconnect(
+                                conn.source_node,
+                                conn.source_port,
+                                conn.target_node,
+                                conn.target_port,
+                            ));
+                            cmds.push(EdCmd::Commit);
+                            self.dconn = Some(DConn {
+                                src_node: conn.source_node,
+                                src_port: conn.source_port,
+                                from,
+                                to: ms,
+                            });
+                        }
+                    }
                 } else if let Some(nid) = self.hit_param(nodes, ms, &vpos) {
                     let value = nodes
                         .iter()

@@ -12,30 +12,32 @@ impl ToneDockApp {
 
     pub(crate) fn discover_serial_rack_chain(
         graph: &crate::audio::graph::AudioGraph,
+        mixer_id: NodeId,
     ) -> Option<Vec<NodeId>> {
         let input_id = graph.input_node_id()?;
-        let output_id = graph.output_node_id()?;
         let mut current = input_id;
         let mut chain = Vec::new();
 
         loop {
-            let next_connections: Vec<_> = graph
+            let next_vst: Vec<_> = graph
                 .connections()
                 .iter()
                 .filter(|conn| conn.source_node == current)
+                .filter(|conn| {
+                    conn.target_node == mixer_id
+                        || graph
+                            .get_node(conn.target_node)
+                            .map(|n| matches!(n.node_type, NodeType::VstPlugin { .. }))
+                            .unwrap_or(false)
+                })
                 .collect();
-            if next_connections.len() != 1 {
+            if next_vst.len() != 1 {
                 return None;
             }
 
-            let next_node_id = next_connections[0].target_node;
-            if next_node_id == output_id {
+            let next_node_id = next_vst[0].target_node;
+            if next_node_id == mixer_id {
                 return Some(chain);
-            }
-
-            let next_node = graph.get_node(next_node_id)?;
-            if !matches!(next_node.node_type, NodeType::VstPlugin { .. }) {
-                return None;
             }
 
             chain.push(next_node_id);
@@ -46,7 +48,8 @@ impl ToneDockApp {
     pub(crate) fn rebuild_rack_projection_from_graph(&mut self) {
         let ordered_ids = {
             let guard = self.audio_engine.graph.load();
-            Self::discover_serial_rack_chain(&guard).unwrap_or_else(|| {
+            Self::discover_serial_rack_chain(&guard, self.audio_engine.master_mixer_id)
+                .unwrap_or_else(|| {
                 self.audio_engine
                     .chain_node_ids
                     .iter()
@@ -92,10 +95,10 @@ impl ToneDockApp {
         let chain_node_ids = self.audio_engine.chain_node_ids.clone();
         let guard = self.audio_engine.graph.load();
         let input_id = self.audio_engine.input_node_id;
-        let output_id = self.audio_engine.output_node_id;
+        let mixer_id = self.audio_engine.master_mixer_id;
         let managed: std::collections::HashSet<NodeId> = std::iter::once(input_id)
             .chain(chain_node_ids.iter().copied())
-            .chain(std::iter::once(output_id))
+            .chain(std::iter::once(mixer_id))
             .collect();
         let managed_connections: Vec<_> = guard
             .connections()
@@ -128,7 +131,7 @@ impl ToneDockApp {
         self.audio_engine.graph_connect(Connection {
             source_node: previous,
             source_port: PortId(0),
-            target_node: output_id,
+            target_node: mixer_id,
             target_port: PortId(0),
         });
         self.audio_engine.graph_commit_topology();

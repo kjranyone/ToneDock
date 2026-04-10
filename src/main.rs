@@ -1,8 +1,6 @@
 mod app;
 mod audio;
 mod crash_logger;
-mod looper;
-mod metronome;
 mod session;
 mod ui;
 mod undo;

@@ -125,7 +125,7 @@ impl ToneDockApp {
                 self.audio_engine.graph_connect(Connection {
                     source_node: converter_id,
                     source_port: PortId(0),
-                    target_node: self.audio_engine.output_node_id,
+                    target_node: self.audio_engine.master_mixer_id,
                     target_port: PortId(0),
                 });
                 self.audio_engine.graph_commit_topology();

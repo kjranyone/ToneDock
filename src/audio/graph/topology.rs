@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::audio::node::{ChannelConfig, Connection, NodeId, NodeType, PortId};
+use crate::audio::node::{
+    ChannelConfig, Connection, NodeId, NodeType, Port, PortDirection, PortId,
+};
 
 use super::{AudioGraph, GraphError, GraphNode};
 
@@ -72,11 +74,14 @@ impl AudioGraph {
             .nodes
             .get(&conn.source_node)
             .ok_or(GraphError::NotFound)?;
-        let source_port = source_node
+        let source_ch = source_node
             .output_ports
             .iter()
             .find(|p| p.id == conn.source_port)
-            .ok_or(GraphError::NotFound)?;
+            .ok_or(GraphError::NotFound)?
+            .channels;
+
+        self.ensure_mixer_port(conn.target_node, conn.target_port);
 
         let target_node = self
             .nodes
@@ -98,7 +103,6 @@ impl AudioGraph {
             return Err(GraphError::AlreadyConnected);
         }
 
-        let source_ch = source_port.channels;
         let target_ch = target_port.channels;
         if source_ch != target_ch
             && !matches!(
@@ -122,6 +126,7 @@ impl AudioGraph {
         }
 
         self.topology_dirty = true;
+        self.grow_mixer_ports(conn.target_node);
         Ok(())
     }
 
@@ -135,6 +140,101 @@ impl AudioGraph {
         });
         if self.connections.len() != before {
             self.topology_dirty = true;
+            self.shrink_mixer_ports(target.0);
+        }
+    }
+
+    fn ensure_mixer_port(&mut self, node_id: NodeId, port_id: PortId) {
+        let is_mixer = self
+            .nodes
+            .get(&node_id)
+            .map(|n| matches!(n.node_type, NodeType::Mixer { .. }))
+            .unwrap_or(false);
+        if !is_mixer {
+            return;
+        }
+        let node = self.nodes.get_mut(&node_id).unwrap();
+        let target_idx = port_id.0 as usize;
+        while node.input_ports.len() <= target_idx {
+            let next_id = node.input_ports.len() as u32;
+            node.input_ports.push(Port {
+                id: PortId(next_id),
+                name: format!("in_{}", next_id),
+                direction: PortDirection::Input,
+                channels: ChannelConfig::Mono,
+            });
+            let mut input_buffers = node.input_buffers.lock();
+            input_buffers.push(None);
+        }
+    }
+
+    fn grow_mixer_ports(&mut self, node_id: NodeId) {
+        let is_mixer = self
+            .nodes
+            .get(&node_id)
+            .map(|n| matches!(n.node_type, NodeType::Mixer { .. }))
+            .unwrap_or(false);
+        if !is_mixer {
+            return;
+        }
+
+        let all_connected = {
+            let node = self.nodes.get(&node_id).unwrap();
+            node.input_ports.iter().all(|port| {
+                self.connections
+                    .iter()
+                    .any(|c| c.target_node == node_id && c.target_port == port.id)
+            })
+        };
+
+        if all_connected {
+            let node = self.nodes.get_mut(&node_id).unwrap();
+            let next_id = node.input_ports.len() as u32;
+            node.input_ports.push(Port {
+                id: PortId(next_id),
+                name: format!("in_{}", next_id),
+                direction: PortDirection::Input,
+                channels: ChannelConfig::Mono,
+            });
+            let mut input_buffers = node.input_buffers.lock();
+            input_buffers.push(None);
+        }
+    }
+
+    fn shrink_mixer_ports(&mut self, node_id: NodeId) {
+        let min_ports = self
+            .nodes
+            .get(&node_id)
+            .and_then(|n| match n.node_type {
+                NodeType::Mixer { inputs } => Some((inputs as usize).max(1)),
+                _ => None,
+            });
+        let Some(min_ports) = min_ports else {
+            return;
+        };
+
+        let node = self.nodes.get_mut(&node_id).unwrap();
+        while node.input_ports.len() > min_ports {
+            let last = node.input_ports.last().unwrap();
+            let last_connected = self
+                .connections
+                .iter()
+                .any(|c| c.target_node == node_id && c.target_port == last.id);
+            if last_connected {
+                break;
+            }
+            let second_last_idx = node.input_ports.len() - 2;
+            let second_last = &node.input_ports[second_last_idx];
+            let second_last_connected = self
+                .connections
+                .iter()
+                .any(|c| c.target_node == node_id && c.target_port == second_last.id);
+            if second_last_connected {
+                break;
+            }
+            node.input_ports.pop();
+            let mut input_buffers = node.input_buffers.lock();
+            input_buffers.pop();
         }
     }
 

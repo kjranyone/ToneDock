@@ -69,12 +69,6 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                     .graph_set_enabled(id, app.metronome_enabled);
                                 app.audio_engine.graph_commit_topology();
                             }
-                            {
-                                let mut met = app.audio_engine.metronome.lock();
-                                met.enabled = app.metronome_enabled;
-                                met.set_bpm(app.metronome_bpm);
-                                met.volume = app.metronome_volume;
-                            }
                         }
 
                         ui.label("BPM");
@@ -96,7 +90,6 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                     }),
                                 );
                             }
-                            app.audio_engine.metronome.lock().set_bpm(bpm);
                         }
 
                         ui.label("Vol");
@@ -113,7 +106,6 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                     }),
                                 );
                             }
-                            app.audio_engine.metronome.lock().volume = vol;
                         }
                     });
                 });
@@ -145,10 +137,6 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                 app.audio_engine.graph_set_enabled(id, app.looper_enabled);
                                 app.audio_engine.graph_commit_topology();
                             }
-                            {
-                                let mut lpr = app.audio_engine.looper.lock();
-                                lpr.enabled = app.looper_enabled;
-                            }
                             if !app.looper_enabled {
                                 app.looper_recording = false;
                                 app.looper_playing = false;
@@ -165,7 +153,6 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                         }),
                                     );
                                 }
-                                app.audio_engine.looper.lock().clear();
                             }
                         }
 
@@ -198,11 +185,6 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                 app.audio_engine.graph_set_enabled(id, true);
                                 app.audio_engine.graph_commit_topology();
                             }
-                            {
-                                let mut lpr = app.audio_engine.looper.lock();
-                                lpr.enabled = true;
-                                lpr.toggle_record();
-                            }
                         }
 
                         let play_fill = if app.looper_playing {
@@ -232,11 +214,6 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                 );
                                 app.audio_engine.graph_set_enabled(id, true);
                                 app.audio_engine.graph_commit_topology();
-                            }
-                            {
-                                let mut lpr = app.audio_engine.looper.lock();
-                                lpr.enabled = true;
-                                lpr.toggle_play();
                             }
                         }
 
@@ -268,7 +245,6 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                     }),
                                 );
                             }
-                            app.audio_engine.looper.lock().toggle_overdub();
                         }
 
                         if ui.add_sized([52.0, 28.0], Button::new("Clear")).clicked() {
@@ -287,7 +263,6 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                     }),
                                 );
                             }
-                            app.audio_engine.looper.lock().clear();
                         }
                     });
                 });
