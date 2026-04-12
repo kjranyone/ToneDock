@@ -98,14 +98,13 @@ impl AudioGraph {
             }
         }
         if let Some(node) = self.nodes.get_mut(&node_id) {
-            node.internal_state =
-                NodeInternalState::Looper(crate::audio::node::LooperNodeState {
-                    enabled: false,
-                    recording: false,
-                    playing: false,
-                    overdubbing: false,
-                    cleared: false,
-                });
+            node.internal_state = NodeInternalState::Looper(crate::audio::node::LooperNodeState {
+                enabled: false,
+                recording: false,
+                playing: false,
+                overdubbing: false,
+                cleared: false,
+            });
         }
     }
 

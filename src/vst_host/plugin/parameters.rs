@@ -1,6 +1,6 @@
-use vst3::Steinberg::Vst::{self, IEditController};
-use vst3::Steinberg::kResultOk;
 use vst3::ComPtr;
+use vst3::Steinberg::kResultOk;
+use vst3::Steinberg::Vst::{self, IEditController};
 
 use crate::audio::chain::ParamInfo;
 

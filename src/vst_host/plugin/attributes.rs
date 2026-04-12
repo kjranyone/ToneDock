@@ -1,15 +1,15 @@
 use std::collections::HashMap;
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 use std::slice;
 use std::sync::Mutex;
 
+use vst3::ComWrapper;
 use vst3::Steinberg::Vst::{IAttributeList, IAttributeListTrait, IMessage, IMessageTrait};
 use vst3::Steinberg::{
-    IBStream, IBStreamTrait, kInvalidArgument, kResultFalse, kResultOk, int32, int64, tresult,
-    uint32,
+    int32, int64, kInvalidArgument, kResultFalse, kResultOk, tresult, uint32, IBStream,
+    IBStreamTrait,
 };
-use vst3::ComWrapper;
 
 use super::seh_ffi::lock_recover;
 

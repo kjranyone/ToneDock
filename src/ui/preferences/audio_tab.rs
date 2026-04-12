@@ -1,6 +1,7 @@
 use egui::*;
 
-use crate::audio::engine::{AudioConfigInfo, AudioDeviceInfo, AudioHostInfo, enumerate_hosts};
+use crate::audio::engine::{enumerate_hosts, AudioConfigInfo, AudioDeviceInfo, AudioHostInfo};
+use crate::i18n::I18n;
 
 use super::{PreferencesResult, SZ_BODY, SZ_SECTION, SZ_SMALL};
 
@@ -190,27 +191,33 @@ impl AudioSettingsState {
     }
 }
 
-pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> PreferencesResult {
+pub(super) fn show_audio_tab(
+    ui: &mut Ui,
+    state: &mut AudioSettingsState,
+    i18n: &I18n,
+) -> PreferencesResult {
     let mut result = PreferencesResult::None;
 
     ui.label(
-        RichText::new("AUDIO DRIVER")
+        RichText::new(i18n.tr("prefs.audio_driver"))
             .size(SZ_SECTION)
             .color(crate::ui::theme::ACCENT),
     );
     ui.add_space(2.0);
+
+    let default_suffix = i18n.tr("prefs.default_suffix");
 
     let selected_host_name = state
         .selected_host
         .and_then(|id| state.hosts.iter().find(|h| h.id == id))
         .map(|h| {
             if h.is_default {
-                format!("{} (default)", h.name)
+                format!("{}{}", h.name, default_suffix)
             } else {
                 h.name.clone()
             }
         })
-        .unwrap_or_else(|| "(none)".into());
+        .unwrap_or_else(|| i18n.tr("prefs.none").into());
 
     let host_ids: Vec<cpal::HostId> = state.hosts.iter().map(|h| h.id).collect();
 
@@ -219,7 +226,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
         .show_ui(ui, |ui| {
             for (i, host) in state.hosts.iter().enumerate() {
                 let label = if host.is_default {
-                    format!("{} (default)", host.name)
+                    format!("{}{}", host.name, default_suffix)
                 } else {
                     host.name.clone()
                 };
@@ -241,7 +248,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
     ui.add_space(10.0);
 
     ui.label(
-        RichText::new("OUTPUT DEVICE")
+        RichText::new(i18n.tr("prefs.output_device"))
             .size(SZ_SECTION)
             .color(crate::ui::theme::ACCENT),
     );
@@ -252,7 +259,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
         .iter()
         .map(|d| {
             if d.is_default {
-                format!("{} (default)", d.name)
+                format!("{}{}", d.name, default_suffix)
             } else {
                 d.name.clone()
             }
@@ -265,7 +272,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
                 .selected_output
                 .and_then(|i| output_names.get(i))
                 .map(|s| s.as_str())
-                .unwrap_or("(none)"),
+                .unwrap_or(i18n.tr("prefs.none")),
         )
         .show_ui(ui, |ui| {
             for (i, label) in output_names.iter().enumerate() {
@@ -289,13 +296,16 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new(format!("Channels: {}", state.output_channel_count))
-                    .size(SZ_SMALL)
-                    .color(crate::ui::theme::TEXT_SECONDARY),
+                RichText::new(i18n.trf(
+                    "prefs.channels",
+                    &[("count", &state.output_channel_count.to_string())],
+                ))
+                .size(SZ_SMALL)
+                .color(crate::ui::theme::TEXT_SECONDARY),
             );
         });
         ui.horizontal(|ui| {
-            ui.label("Left ch:");
+            ui.label(i18n.tr("prefs.left_ch"));
             let mut ch_l = state.output_ch_l as u32;
             egui::DragValue::new(&mut ch_l)
                 .range(0..=state.output_channel_count as u32 - 1)
@@ -305,7 +315,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
 
             ui.add_space(8.0);
 
-            ui.label("Right ch:");
+            ui.label(i18n.tr("prefs.right_ch"));
             let mut ch_r = state.output_ch_r as u32;
             egui::DragValue::new(&mut ch_r)
                 .range(0..=state.output_channel_count as u32 - 1)
@@ -318,7 +328,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
     ui.add_space(10.0);
 
     ui.label(
-        RichText::new("INPUT DEVICE")
+        RichText::new(i18n.tr("prefs.input_device"))
             .size(SZ_SECTION)
             .color(crate::ui::theme::ACCENT),
     );
@@ -329,7 +339,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
         .iter()
         .map(|d| {
             if d.is_default {
-                format!("{} (default)", d.name)
+                format!("{}{}", d.name, default_suffix)
             } else {
                 d.name.clone()
             }
@@ -342,11 +352,11 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
                 .selected_input
                 .and_then(|i| input_names.get(i))
                 .map(|s| s.as_str())
-                .unwrap_or("(none)"),
+                .unwrap_or(i18n.tr("prefs.none")),
         )
         .show_ui(ui, |ui| {
             if ui
-                .selectable_label(state.selected_input.is_none(), "(none)")
+                .selectable_label(state.selected_input.is_none(), i18n.tr("prefs.none"))
                 .clicked()
             {
                 state.selected_input = None;
@@ -371,13 +381,16 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new(format!("Channels: {}", state.input_channel_count))
-                    .size(SZ_SMALL)
-                    .color(crate::ui::theme::TEXT_SECONDARY),
+                RichText::new(i18n.trf(
+                    "prefs.channels",
+                    &[("count", &state.input_channel_count.to_string())],
+                ))
+                .size(SZ_SMALL)
+                .color(crate::ui::theme::TEXT_SECONDARY),
             );
         });
         ui.horizontal(|ui| {
-            ui.label("Input ch:");
+            ui.label(i18n.tr("prefs.input_ch"));
             let mut input_ch = state.input_ch as u32;
             egui::DragValue::new(&mut input_ch)
                 .range(0..=state.input_channel_count as u32 - 1)
@@ -393,7 +406,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
 
     if is_asio {
         ui.label(
-            RichText::new("SAMPLE RATE (ASIO — device controlled)")
+            RichText::new(i18n.tr("prefs.sample_rate_asio"))
                 .size(SZ_SECTION)
                 .color(crate::ui::theme::ACCENT),
         );
@@ -407,7 +420,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
         ui.add_space(10.0);
 
         ui.label(
-            RichText::new("BUFFER SIZE (ASIO — device controlled)")
+            RichText::new(i18n.tr("prefs.buffer_size_asio"))
                 .size(SZ_SECTION)
                 .color(crate::ui::theme::ACCENT),
         );
@@ -420,7 +433,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
         );
     } else {
         ui.label(
-            RichText::new("SAMPLE RATE")
+            RichText::new(i18n.tr("prefs.sample_rate"))
                 .size(SZ_SECTION)
                 .color(crate::ui::theme::ACCENT),
         );
@@ -448,7 +461,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
         ui.add_space(10.0);
 
         ui.label(
-            RichText::new("BUFFER SIZE")
+            RichText::new(i18n.tr("prefs.buffer_size"))
                 .size(SZ_SECTION)
                 .color(crate::ui::theme::ACCENT),
         );
@@ -486,7 +499,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
 
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Apply").clicked() {
+            if ui.button(i18n.tr("prefs.apply")).clicked() {
                 let input_name = state
                     .selected_input
                     .and_then(|i| state.input_devices.get(i))
@@ -507,7 +520,7 @@ pub(super) fn show_audio_tab(ui: &mut Ui, state: &mut AudioSettingsState) -> Pre
                 };
             }
 
-            if ui.button("Cancel").clicked() {
+            if ui.button(i18n.tr("prefs.cancel")).clicked() {
                 result = PreferencesResult::AudioCancel;
             }
         });

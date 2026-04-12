@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::audio::engine::AudioEngine;
 use crate::audio::node::NodeId;
+use crate::i18n::{I18n, Language};
 use crate::ui::node_editor::NodeEditor;
 use crate::ui::rack_view::RackView;
 use crate::undo::UndoManager;
@@ -17,19 +18,14 @@ mod templates;
 mod toolbar;
 mod transport;
 
-fn ser_host_id<S: serde::Serializer>(
-    val: &Option<cpal::HostId>,
-    s: S,
-) -> Result<S::Ok, S::Error> {
+fn ser_host_id<S: serde::Serializer>(val: &Option<cpal::HostId>, s: S) -> Result<S::Ok, S::Error> {
     match val {
         Some(id) => s.serialize_some(id.name()),
         None => s.serialize_none(),
     }
 }
 
-fn de_host_id<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<cpal::HostId>, D::Error> {
+fn de_host_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<cpal::HostId>, D::Error> {
     let name: Option<String> = serde::Deserialize::deserialize(d)?;
     Ok(name.and_then(|n| {
         cpal::platform::available_hosts()
@@ -56,6 +52,7 @@ struct AppSettings {
     pub input_gain: f32,
     pub custom_plugin_paths: Vec<std::path::PathBuf>,
     pub inline_rack_plugin_gui: bool,
+    pub language: Language,
 }
 
 impl Default for AppSettings {
@@ -72,6 +69,7 @@ impl Default for AppSettings {
             input_gain: 1.0,
             custom_plugin_paths: Vec::new(),
             inline_rack_plugin_gui: false,
+            language: Language::default(),
         }
     }
 }
@@ -84,6 +82,7 @@ pub(super) enum ViewMode {
 }
 
 pub struct ToneDockApp {
+    i18n: I18n,
     audio_engine: AudioEngine,
     rack_view: RackView,
     node_editor: NodeEditor,
@@ -137,14 +136,19 @@ impl ToneDockApp {
             panic!("Audio engine init failed: {}", e);
         });
 
+        let i18n = I18n::new(settings.language);
+        let preset_name: String = i18n.tr("file.untitled").into();
+        let initial_status: String = i18n.tr("status.ready").into();
+
         let mut app = Self {
+            i18n,
             audio_engine,
             rack_view: RackView::new(),
             node_editor: NodeEditor::new(),
             view_mode: ViewMode::Rack,
             available_plugins: Vec::new(),
             custom_plugin_paths: settings.custom_plugin_paths.clone(),
-            preset_name: "Untitled".into(),
+            preset_name,
             undo_manager: UndoManager::new(),
             metronome_enabled: false,
             metronome_bpm: 120.0,
@@ -161,7 +165,7 @@ impl ToneDockApp {
             inline_rack_plugin_gui: settings.inline_rack_plugin_gui,
             inline_rack_editor_node: None,
             show_about: false,
-            status_message: "Ready".into(),
+            status_message: initial_status,
             show_preferences: false,
             preferences_state: None,
             master_volume: settings.master_volume,
@@ -218,6 +222,7 @@ impl ToneDockApp {
         self.settings.input_gain = self.input_gain;
         self.settings.custom_plugin_paths = self.custom_plugin_paths.clone();
         self.settings.inline_rack_plugin_gui = self.inline_rack_plugin_gui;
+        self.settings.language = self.i18n.language();
         self.settings_dirty = true;
     }
 
@@ -226,11 +231,16 @@ impl ToneDockApp {
         match chain.scan_plugins() {
             Ok(plugins) => {
                 self.available_plugins = plugins;
-                self.status_message = format!("Found {} plugins", self.available_plugins.len());
+                self.status_message = self.i18n.trf(
+                    "status.found_plugins",
+                    &[("count", &self.available_plugins.len().to_string())],
+                );
                 log::info!("Scanned {} plugins", self.available_plugins.len());
             }
             Err(e) => {
-                self.status_message = format!("Scan error: {}", e);
+                self.status_message = self
+                    .i18n
+                    .trf("status.scan_error", &[("error", &e.to_string())]);
                 log::error!("Plugin scan failed: {}", e);
             }
         }
@@ -257,14 +267,19 @@ impl ToneDockApp {
                         self.available_plugins.push(p);
                     }
                 }
-                self.status_message = format!("Found {} plugins", self.available_plugins.len());
+                self.status_message = self.i18n.trf(
+                    "status.found_plugins",
+                    &[("count", &self.available_plugins.len().to_string())],
+                );
                 log::info!(
                     "Scanned {} plugins (with custom paths)",
                     self.available_plugins.len()
                 );
             }
             Err(e) => {
-                self.status_message = format!("Scan error: {}", e);
+                self.status_message = self
+                    .i18n
+                    .trf("status.scan_error", &[("error", &e.to_string())]);
                 log::error!("Plugin scan failed: {}", e);
             }
         }
@@ -272,10 +287,16 @@ impl ToneDockApp {
 
     pub(crate) fn start_audio(&mut self) {
         if let Err(e) = self.audio_engine.start() {
-            self.status_message = format!("Audio error: {}", e);
+            self.status_message = self
+                .i18n
+                .trf("status.audio_error", &[("error", &e.to_string())]);
             log::error!("Audio start failed: {}", e);
         } else {
-            self.status_message = "Audio running".into();
+            self.status_message = self.i18n.tr("status.audio_running").into();
         }
+    }
+
+    pub(crate) fn set_language(&mut self, lang: Language) {
+        self.i18n = I18n::new(lang);
     }
 }

@@ -65,10 +65,8 @@ unsafe extern "C" {
         ctx: *mut c_void,
     ) -> i32;
     #[link_name = "seh_call_set_component_handler"]
-    pub(super) fn seh_call_set_component_handler(
-        com_obj: *mut c_void,
-        handler: *mut c_void,
-    ) -> i32;
+    pub(super) fn seh_call_set_component_handler(com_obj: *mut c_void, handler: *mut c_void)
+        -> i32;
     #[link_name = "seh_call_get_parameter_count"]
     pub(super) fn seh_call_get_parameter_count(com_obj: *mut c_void) -> i32;
     #[link_name = "seh_call_get_parameter_info"]
@@ -80,11 +78,7 @@ unsafe extern "C" {
     #[link_name = "seh_call_get_param_normalized"]
     pub(super) fn seh_call_get_param_normalized(com_obj: *mut c_void, id: u32) -> f64;
     #[link_name = "seh_call_set_param_normalized"]
-    pub(super) fn seh_call_set_param_normalized(
-        com_obj: *mut c_void,
-        id: u32,
-        val: f64,
-    ) -> i32;
+    pub(super) fn seh_call_set_param_normalized(com_obj: *mut c_void, id: u32, val: f64) -> i32;
     #[link_name = "seh_call_set_io_mode"]
     pub(super) fn seh_call_set_io_mode(com_obj: *mut c_void, mode: i32) -> i32;
     #[link_name = "seh_call_get_controller_class_id"]

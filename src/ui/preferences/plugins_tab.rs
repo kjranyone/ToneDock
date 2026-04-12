@@ -1,5 +1,6 @@
 use egui::*;
 
+use crate::i18n::I18n;
 use crate::vst_host::scanner::PluginInfo;
 
 use super::{PreferencesResult, PreferencesState, SZ_BODY, SZ_PATH, SZ_SECTION, SZ_SMALL};
@@ -8,27 +9,26 @@ pub(super) fn show_plugins_tab(
     ui: &mut Ui,
     state: &mut PreferencesState,
     available_plugins: &[PluginInfo],
+    i18n: &I18n,
 ) -> PreferencesResult {
     let mut result = PreferencesResult::None;
 
     let before_inline_mode = state.inline_rack_plugin_gui;
 
     ui.label(
-        RichText::new("RACK GUI MODE")
+        RichText::new(i18n.tr("prefs.rack_gui_mode"))
             .size(SZ_SECTION)
             .color(crate::ui::theme::ACCENT),
     );
     ui.add_space(4.0);
     ui.checkbox(
         &mut state.inline_rack_plugin_gui,
-        "Inline plugin GUI inside Rack Mode",
+        i18n.tr("prefs.inline_gui_desc"),
     );
     ui.label(
-        RichText::new(
-            "Off: open VST GUI in a separate window. On: show the selected plugin GUI inline in the rack area.",
-        )
-        .size(SZ_SMALL)
-        .color(crate::ui::theme::TEXT_SECONDARY),
+        RichText::new(i18n.tr("prefs.inline_gui_detail"))
+            .size(SZ_SMALL)
+            .color(crate::ui::theme::TEXT_SECONDARY),
     );
     ui.add_space(10.0);
 
@@ -37,13 +37,13 @@ pub(super) fn show_plugins_tab(
     }
 
     ui.horizontal(|ui| {
-        if ui.button("Rescan All Plugins").clicked() {
+        if ui.button(i18n.tr("prefs.rescan")).clicked() {
             result = PreferencesResult::RescanPlugins;
         }
 
-        if ui.button("Add Plugin Path...").clicked() {
+        if ui.button(i18n.tr("prefs.add_path")).clicked() {
             if let Some(path) = rfd::FileDialog::new()
-                .set_title("Select VST3 Plugin Folder")
+                .set_title(i18n.tr("prefs.select_folder"))
                 .pick_folder()
             {
                 result = PreferencesResult::AddPluginPath(path);
@@ -63,7 +63,7 @@ pub(super) fn show_plugins_tab(
     ui.add_space(6.0);
 
     ui.label(
-        RichText::new("PLUGIN SEARCH PATHS")
+        RichText::new(i18n.tr("prefs.search_paths"))
             .size(SZ_SECTION)
             .color(crate::ui::theme::ACCENT),
     );
@@ -90,7 +90,7 @@ pub(super) fn show_plugins_tab(
             );
             if !exists {
                 ui.label(
-                    RichText::new("(not found)")
+                    RichText::new(i18n.tr("prefs.not_found"))
                         .size(SZ_SMALL)
                         .color(crate::ui::theme::DISABLED),
                 );
@@ -120,12 +120,12 @@ pub(super) fn show_plugins_tab(
                 );
                 if !exists {
                     ui.label(
-                        RichText::new("(not found)")
+                        RichText::new(i18n.tr("prefs.not_found"))
                             .size(SZ_SMALL)
                             .color(crate::ui::theme::DISABLED),
                     );
                 }
-                if ui.small_button("Remove").clicked() {
+                if ui.small_button(i18n.tr("prefs.remove")).clicked() {
                     remove_idx = Some(i);
                 }
             });
@@ -138,9 +138,12 @@ pub(super) fn show_plugins_tab(
     ui.add_space(10.0);
 
     ui.label(
-        RichText::new(format!("DISCOVERED PLUGINS ({})", available_plugins.len()))
-            .size(SZ_SECTION)
-            .color(crate::ui::theme::ACCENT),
+        RichText::new(i18n.trf(
+            "prefs.discovered_plugins",
+            &[("count", &available_plugins.len().to_string())],
+        ))
+        .size(SZ_SECTION)
+        .color(crate::ui::theme::ACCENT),
     );
     ui.add_space(4.0);
 
@@ -152,12 +155,12 @@ pub(super) fn show_plugins_tab(
                 ui.vertical_centered(|ui| {
                     ui.add_space(16.0);
                     ui.label(
-                        RichText::new("No plugins found")
+                        RichText::new(i18n.tr("prefs.no_plugins"))
                             .size(SZ_BODY)
                             .color(crate::ui::theme::TEXT_SECONDARY),
                     );
                     ui.label(
-                        RichText::new("Click 'Rescan All Plugins' or add a custom path")
+                        RichText::new(i18n.tr("prefs.rescan_hint"))
                             .size(SZ_SMALL)
                             .color(crate::ui::theme::TEXT_SECONDARY),
                     );

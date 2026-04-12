@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 mod option_base64 {
-    use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>

@@ -53,7 +53,10 @@ pub(super) fn apply_command(graph: &mut AudioGraph, cmd: GraphCommand) {
     }
 }
 
-pub(super) fn prepare_runtime_graph(staging: &mut AudioGraph, runtime_config: Option<(f64, usize)>) {
+pub(super) fn prepare_runtime_graph(
+    staging: &mut AudioGraph,
+    runtime_config: Option<(f64, usize)>,
+) {
     let Some((sample_rate, max_frames)) = runtime_config else {
         return;
     };

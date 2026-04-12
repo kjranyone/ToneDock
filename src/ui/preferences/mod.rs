@@ -3,6 +3,7 @@ mod plugins_tab;
 
 use egui::*;
 
+use crate::i18n::{I18n, Language};
 use crate::vst_host::scanner::PluginInfo;
 
 pub use audio_tab::AudioSettingsState;
@@ -35,6 +36,7 @@ pub enum PreferencesResult {
     RescanPlugins,
     AddPluginPath(std::path::PathBuf),
     SetInlineRackPluginGui(bool),
+    SetLanguage(Language),
 }
 
 impl PreferencesState {
@@ -88,10 +90,11 @@ pub fn show_preferences(
     ctx: &Context,
     state: &mut PreferencesState,
     available_plugins: &[PluginInfo],
+    i18n: &I18n,
 ) -> PreferencesResult {
     let mut result = PreferencesResult::None;
 
-    Window::new("Preferences")
+    Window::new(i18n.tr("prefs.title"))
         .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
         .resizable(true)
         .collapsible(false)
@@ -104,11 +107,14 @@ pub fn show_preferences(
                     let audio_selected = matches!(state.tab, PreferencesTab::Audio);
                     let plugins_selected = matches!(state.tab, PreferencesTab::Plugins);
 
-                    if ui.selectable_label(audio_selected, "Audio").clicked() {
+                    if ui
+                        .selectable_label(audio_selected, i18n.tr("prefs.audio"))
+                        .clicked()
+                    {
                         state.tab = PreferencesTab::Audio;
                     }
                     if ui
-                        .selectable_label(plugins_selected, "Plugins (VST)")
+                        .selectable_label(plugins_selected, i18n.tr("prefs.plugins_vst"))
                         .clicked()
                     {
                         state.tab = PreferencesTab::Plugins;
@@ -118,12 +124,42 @@ pub fn show_preferences(
                 ui.separator();
                 ui.add_space(4.0);
 
+                ui.label(
+                    RichText::new(i18n.tr("prefs.language"))
+                        .size(SZ_SECTION)
+                        .color(crate::ui::theme::ACCENT),
+                );
+                ui.add_space(2.0);
+
+                let current_lang = i18n.language();
+                egui::ComboBox::from_id_salt("language_select")
+                    .selected_text(current_lang.display_name())
+                    .show_ui(ui, |ui| {
+                        for lang in Language::ALL {
+                            if ui
+                                .selectable_label(current_lang == lang, lang.display_name())
+                                .clicked()
+                            {
+                                result = PreferencesResult::SetLanguage(lang);
+                            }
+                        }
+                    });
+
+                ui.add_space(8.0);
+
                 match state.tab {
                     PreferencesTab::Audio => {
-                        result = audio_tab::show_audio_tab(ui, &mut state.audio);
+                        let audio_result = audio_tab::show_audio_tab(ui, &mut state.audio, i18n);
+                        if matches!(result, PreferencesResult::None) {
+                            result = audio_result;
+                        }
                     }
                     PreferencesTab::Plugins => {
-                        result = plugins_tab::show_plugins_tab(ui, state, available_plugins);
+                        let plugins_result =
+                            plugins_tab::show_plugins_tab(ui, state, available_plugins, i18n);
+                        if matches!(result, PreferencesResult::None) {
+                            result = plugins_result;
+                        }
                     }
                 }
             });

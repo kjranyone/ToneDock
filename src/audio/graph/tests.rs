@@ -225,12 +225,54 @@ fn test_splitter_mixer_parallel() {
         node.internal_state = NodeInternalState::Gain { value: 0.3 };
     }
 
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: splitter_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: splitter_id, source_port: PortId(0), target_node: gain_a_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: splitter_id, source_port: PortId(1), target_node: gain_b_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: gain_a_id, source_port: PortId(0), target_node: mixer_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: gain_b_id, source_port: PortId(0), target_node: mixer_id, target_port: PortId(1) }).unwrap();
-    graph.connect(Connection { source_node: mixer_id, source_port: PortId(0), target_node: output_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: splitter_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: splitter_id,
+            source_port: PortId(0),
+            target_node: gain_a_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: splitter_id,
+            source_port: PortId(1),
+            target_node: gain_b_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: gain_a_id,
+            source_port: PortId(0),
+            target_node: mixer_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: gain_b_id,
+            source_port: PortId(0),
+            target_node: mixer_id,
+            target_port: PortId(1),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: mixer_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
 
     graph.commit_topology().unwrap();
 
@@ -239,7 +281,13 @@ fn test_splitter_mixer_parallel() {
 
     for i in 0..256 {
         let expected = 0.5 + 0.3;
-        assert!((output[0][i] - expected).abs() < 0.001, "Expected {} but got {} at frame {}", expected, output[0][i], i);
+        assert!(
+            (output[0][i] - expected).abs() < 0.001,
+            "Expected {} but got {} at frame {}",
+            expected,
+            output[0][i],
+            i
+        );
     }
 }
 
@@ -256,7 +304,10 @@ fn test_mono_stereo_auto_conversion_allowed() {
         target_port: PortId(0),
     });
 
-    assert!(result.is_ok(), "Stereo->Mono auto-conversion should be allowed");
+    assert!(
+        result.is_ok(),
+        "Stereo->Mono auto-conversion should be allowed"
+    );
 }
 
 #[test]
@@ -265,7 +316,14 @@ fn test_disconnect() {
     let input_id = graph.add_node(NodeType::AudioInput).unwrap();
     let gain_id = graph.add_node(NodeType::Gain).unwrap();
 
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: gain_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: gain_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
     assert_eq!(graph.connections().len(), 1);
     graph.disconnect((input_id, PortId(0)), (gain_id, PortId(0)));
     assert!(graph.connections().is_empty());
@@ -284,15 +342,33 @@ fn test_bypass_node() {
         gain_node.bypassed = true;
     }
 
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: gain_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: gain_id, source_port: PortId(0), target_node: output_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: gain_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: gain_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
     graph.commit_topology().unwrap();
 
     let input = vec![vec![1.0f32; 256]];
     let output = graph.process(&input, 256);
 
     for i in 0..256 {
-        assert!((output[0][i] - 1.0).abs() < 0.001, "Bypassed gain should pass through: got {}", output[0][i]);
+        assert!(
+            (output[0][i] - 1.0).abs() < 0.001,
+            "Bypassed gain should pass through: got {}",
+            output[0][i]
+        );
     }
 }
 
@@ -303,17 +379,37 @@ fn test_disabled_node() {
     let gain_id = graph.add_node(NodeType::Gain).unwrap();
     let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
 
-    { graph.get_node_mut(gain_id).unwrap().enabled = false; }
+    {
+        graph.get_node_mut(gain_id).unwrap().enabled = false;
+    }
 
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: gain_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: gain_id, source_port: PortId(0), target_node: output_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: gain_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: gain_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
     graph.commit_topology().unwrap();
 
     let input = vec![vec![1.0f32; 256]];
     let output = graph.process(&input, 256);
 
     for i in 0..256 {
-        assert!((output[0][i]).abs() < 0.001, "Disabled node should output silence: got {}", output[0][i]);
+        assert!(
+            (output[0][i]).abs() < 0.001,
+            "Disabled node should output silence: got {}",
+            output[0][i]
+        );
     }
 }
 
@@ -346,7 +442,12 @@ fn test_already_connected() {
     let input_id = graph.add_node(NodeType::AudioInput).unwrap();
     let gain_id = graph.add_node(NodeType::Gain).unwrap();
 
-    let conn = Connection { source_node: input_id, source_port: PortId(0), target_node: gain_id, target_port: PortId(0) };
+    let conn = Connection {
+        source_node: input_id,
+        source_port: PortId(0),
+        target_node: gain_id,
+        target_port: PortId(0),
+    };
     graph.connect(conn.clone()).unwrap();
     let result = graph.connect(conn);
     assert!(matches!(result, Err(GraphError::AlreadyConnected)));
@@ -359,10 +460,29 @@ fn test_reject_second_source_to_same_input_port() {
     let split_id = graph.add_node(NodeType::Splitter { outputs: 2 }).unwrap();
     let gain_id = graph.add_node(NodeType::Gain).unwrap();
 
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: split_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: split_id, source_port: PortId(0), target_node: gain_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: split_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: split_id,
+            source_port: PortId(0),
+            target_node: gain_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
 
-    let result = graph.connect(Connection { source_node: split_id, source_port: PortId(1), target_node: gain_id, target_port: PortId(0) });
+    let result = graph.connect(Connection {
+        source_node: split_id,
+        source_port: PortId(1),
+        target_node: gain_id,
+        target_port: PortId(0),
+    });
     assert!(matches!(result, Err(GraphError::AlreadyConnected)));
 }
 
@@ -370,7 +490,10 @@ fn test_reject_second_source_to_same_input_port() {
 fn test_vst_plugin_node_is_mono_in_stereo_out() {
     let node = GraphNode::new(
         NodeId(1),
-        NodeType::VstPlugin { plugin_path: "test.vst3".into(), plugin_name: "Test".into() },
+        NodeType::VstPlugin {
+            plugin_path: "test.vst3".into(),
+            plugin_name: "Test".into(),
+        },
         256,
     );
     assert_eq!(node.input_ports[0].channels.channel_count(), 1);
@@ -380,7 +503,12 @@ fn test_vst_plugin_node_is_mono_in_stereo_out() {
 #[test]
 fn test_connect_nonexistent_node() {
     let mut graph = AudioGraph::new(48000.0, 256);
-    let result = graph.connect(Connection { source_node: NodeId(999), source_port: PortId(0), target_node: NodeId(998), target_port: PortId(0) });
+    let result = graph.connect(Connection {
+        source_node: NodeId(999),
+        source_port: PortId(0),
+        target_node: NodeId(998),
+        target_port: PortId(0),
+    });
     assert!(matches!(result, Err(GraphError::NotFound)));
 }
 
@@ -392,20 +520,59 @@ fn test_wetdry_node() {
     let wetdry_id = graph.add_node(NodeType::WetDry).unwrap();
     let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
 
-    { graph.get_node_mut(wetdry_id).unwrap().internal_state = NodeInternalState::WetDry { mix: 0.5 }; }
+    {
+        graph.get_node_mut(wetdry_id).unwrap().internal_state =
+            NodeInternalState::WetDry { mix: 0.5 };
+    }
 
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: splitter_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: splitter_id, source_port: PortId(0), target_node: wetdry_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: splitter_id, source_port: PortId(1), target_node: wetdry_id, target_port: PortId(1) }).unwrap();
-    graph.connect(Connection { source_node: wetdry_id, source_port: PortId(0), target_node: output_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: splitter_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: splitter_id,
+            source_port: PortId(0),
+            target_node: wetdry_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: splitter_id,
+            source_port: PortId(1),
+            target_node: wetdry_id,
+            target_port: PortId(1),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: wetdry_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
 
     graph.commit_topology().unwrap();
     let input = vec![vec![0.8f32; 256]];
     let output = graph.process(&input, 256);
 
     for i in 0..256 {
-        assert!((output[0][i] - 0.8).abs() < 0.001, "Wet/Dry mix=0.5 should output ~0.8 at sample {}", i);
-        assert!((output[1][i] - 0.8).abs() < 0.001, "Wet/Dry mix=0.5 should output ~0.8 at sample {}", i);
+        assert!(
+            (output[0][i] - 0.8).abs() < 0.001,
+            "Wet/Dry mix=0.5 should output ~0.8 at sample {}",
+            i
+        );
+        assert!(
+            (output[1][i] - 0.8).abs() < 0.001,
+            "Wet/Dry mix=0.5 should output ~0.8 at sample {}",
+            i
+        );
     }
 }
 
@@ -415,23 +582,68 @@ fn test_wetdry_full_wet() {
     let input_id = graph.add_node(NodeType::AudioInput).unwrap();
     let splitter_id = graph.add_node(NodeType::Splitter { outputs: 2 }).unwrap();
     let gain_id = graph.add_node(NodeType::Gain).unwrap();
-    { graph.get_node_mut(gain_id).unwrap().internal_state = NodeInternalState::Gain { value: 0.5 }; }
+    {
+        graph.get_node_mut(gain_id).unwrap().internal_state =
+            NodeInternalState::Gain { value: 0.5 };
+    }
     let wetdry_id = graph.add_node(NodeType::WetDry).unwrap();
     let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
-    { graph.get_node_mut(wetdry_id).unwrap().internal_state = NodeInternalState::WetDry { mix: 1.0 }; }
+    {
+        graph.get_node_mut(wetdry_id).unwrap().internal_state =
+            NodeInternalState::WetDry { mix: 1.0 };
+    }
 
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: splitter_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: splitter_id, source_port: PortId(0), target_node: wetdry_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: splitter_id, source_port: PortId(1), target_node: gain_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: gain_id, source_port: PortId(0), target_node: wetdry_id, target_port: PortId(1) }).unwrap();
-    graph.connect(Connection { source_node: wetdry_id, source_port: PortId(0), target_node: output_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: splitter_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: splitter_id,
+            source_port: PortId(0),
+            target_node: wetdry_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: splitter_id,
+            source_port: PortId(1),
+            target_node: gain_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: gain_id,
+            source_port: PortId(0),
+            target_node: wetdry_id,
+            target_port: PortId(1),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: wetdry_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
 
     graph.commit_topology().unwrap();
     let input = vec![vec![1.0f32; 256]];
     let output = graph.process(&input, 256);
 
     for i in 0..256 {
-        assert!((output[0][i] - 0.5).abs() < 0.001, "Full wet should output gain*input=0.5 at sample {}", i);
+        assert!(
+            (output[0][i] - 0.5).abs() < 0.001,
+            "Full wet should output gain*input=0.5 at sample {}",
+            i
+        );
     }
 }
 
@@ -439,20 +651,69 @@ fn test_wetdry_full_wet() {
 fn test_send_return_bus() {
     let mut graph = AudioGraph::new(48000.0, 256);
     let input_id = graph.add_node(NodeType::AudioInput).unwrap();
-    let converter_id = graph.add_node(NodeType::ChannelConverter { target: ChannelConfig::Stereo }).unwrap();
+    let converter_id = graph
+        .add_node(NodeType::ChannelConverter {
+            target: ChannelConfig::Stereo,
+        })
+        .unwrap();
     let send_id = graph.add_node(NodeType::SendBus { bus_id: 1 }).unwrap();
     let return_id = graph.add_node(NodeType::ReturnBus { bus_id: 1 }).unwrap();
     let mixer_id = graph.add_node(NodeType::Mixer { inputs: 2 }).unwrap();
     let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
 
-    { graph.get_node_mut(send_id).unwrap().internal_state = NodeInternalState::SendBus { send_level: 0.5 }; }
+    {
+        graph.get_node_mut(send_id).unwrap().internal_state =
+            NodeInternalState::SendBus { send_level: 0.5 };
+    }
 
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: converter_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: converter_id, source_port: PortId(0), target_node: send_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: send_id, source_port: PortId(0), target_node: mixer_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: send_id, source_port: PortId(1), target_node: return_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: return_id, source_port: PortId(0), target_node: mixer_id, target_port: PortId(1) }).unwrap();
-    graph.connect(Connection { source_node: mixer_id, source_port: PortId(0), target_node: output_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: converter_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: converter_id,
+            source_port: PortId(0),
+            target_node: send_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: send_id,
+            source_port: PortId(0),
+            target_node: mixer_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: send_id,
+            source_port: PortId(1),
+            target_node: return_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: return_id,
+            source_port: PortId(0),
+            target_node: mixer_id,
+            target_port: PortId(1),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: mixer_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
 
     graph.commit_topology().unwrap();
     let input = vec![vec![1.0f32; 256]];
@@ -461,7 +722,12 @@ fn test_send_return_bus() {
     assert_eq!(output.len(), 2);
     for i in 0..10 {
         let mixed = 1.0 + 0.5;
-        assert!((output[0][i] - mixed).abs() < 0.01, "Output should be thru+send at sample {}: got {}", i, output[0][i]);
+        assert!(
+            (output[0][i] - mixed).abs() < 0.01,
+            "Output should be thru+send at sample {}: got {}",
+            i,
+            output[0][i]
+        );
     }
 }
 
@@ -469,27 +735,81 @@ fn test_send_return_bus() {
 fn test_send_bus_zero_level() {
     let mut graph = AudioGraph::new(48000.0, 256);
     let input_id = graph.add_node(NodeType::AudioInput).unwrap();
-    let converter_id = graph.add_node(NodeType::ChannelConverter { target: ChannelConfig::Stereo }).unwrap();
+    let converter_id = graph
+        .add_node(NodeType::ChannelConverter {
+            target: ChannelConfig::Stereo,
+        })
+        .unwrap();
     let send_id = graph.add_node(NodeType::SendBus { bus_id: 1 }).unwrap();
     let return_id = graph.add_node(NodeType::ReturnBus { bus_id: 1 }).unwrap();
     let mixer_id = graph.add_node(NodeType::Mixer { inputs: 2 }).unwrap();
     let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
 
-    { graph.get_node_mut(send_id).unwrap().internal_state = NodeInternalState::SendBus { send_level: 0.0 }; }
+    {
+        graph.get_node_mut(send_id).unwrap().internal_state =
+            NodeInternalState::SendBus { send_level: 0.0 };
+    }
 
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: converter_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: converter_id, source_port: PortId(0), target_node: send_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: send_id, source_port: PortId(0), target_node: mixer_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: send_id, source_port: PortId(1), target_node: return_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: return_id, source_port: PortId(0), target_node: mixer_id, target_port: PortId(1) }).unwrap();
-    graph.connect(Connection { source_node: mixer_id, source_port: PortId(0), target_node: output_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: converter_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: converter_id,
+            source_port: PortId(0),
+            target_node: send_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: send_id,
+            source_port: PortId(0),
+            target_node: mixer_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: send_id,
+            source_port: PortId(1),
+            target_node: return_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: return_id,
+            source_port: PortId(0),
+            target_node: mixer_id,
+            target_port: PortId(1),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: mixer_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
 
     graph.commit_topology().unwrap();
     let input = vec![vec![1.0f32; 256]];
     let output = graph.process(&input, 256);
 
     for i in 0..10 {
-        assert!((output[0][i] - 1.0).abs() < 0.01, "Zero send should give only thru signal at sample {}: got {}", i, output[0][i]);
+        assert!(
+            (output[0][i] - 1.0).abs() < 0.01,
+            "Zero send should give only thru signal at sample {}: got {}",
+            i,
+            output[0][i]
+        );
     }
 }
 
@@ -501,7 +821,10 @@ fn test_add_node_with_id() {
 
     graph.add_node_with_id(NodeId(10), NodeType::Gain).unwrap();
     assert!(graph.get_node(NodeId(10)).is_some());
-    assert!(matches!(graph.get_node(NodeId(10)).unwrap().node_type, NodeType::Gain));
+    assert!(matches!(
+        graph.get_node(NodeId(10)).unwrap().node_type,
+        NodeType::Gain
+    ));
 }
 
 #[test]
@@ -519,8 +842,22 @@ fn test_undo_remove_node_restore() {
     let gain_id = graph.add_node(NodeType::Gain).unwrap();
     let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
 
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: gain_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: gain_id, source_port: PortId(0), target_node: output_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: gain_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: gain_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
 
     graph.set_node_internal_state(gain_id, NodeInternalState::Gain { value: 1.5 });
     graph.set_node_position(gain_id, 100.0, 200.0);
@@ -533,19 +870,41 @@ fn test_undo_remove_node_restore() {
     graph.add_node_with_id(gain_id, NodeType::Gain).unwrap();
     graph.set_node_position(gain_id, 100.0, 200.0);
     graph.set_node_internal_state(gain_id, NodeInternalState::Gain { value: 1.5 });
-    graph.connect(Connection { source_node: input_id, source_port: PortId(0), target_node: gain_id, target_port: PortId(0) }).unwrap();
-    graph.connect(Connection { source_node: gain_id, source_port: PortId(0), target_node: output_id, target_port: PortId(0) }).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: gain_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: gain_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
     graph.commit_topology().unwrap();
 
     assert!(graph.get_node(gain_id).is_some());
     let node = graph.get_node(gain_id).unwrap();
     assert_eq!(node.position, (100.0, 200.0));
-    assert!(matches!(node.internal_state, NodeInternalState::Gain { value: 1.5 }));
+    assert!(matches!(
+        node.internal_state,
+        NodeInternalState::Gain { value: 1.5 }
+    ));
     assert_eq!(graph.connections().len(), 2);
 
     let input = vec![vec![1.0f32; 256]];
     let output = graph.process(&input, 256);
     for i in 0..10 {
-        assert!((output[0][i] - 1.5).abs() < 0.01, "Restored gain node should apply gain at sample {}: got {}", i, output[0][i]);
+        assert!(
+            (output[0][i] - 1.5).abs() < 0.01,
+            "Restored gain node should apply gain at sample {}: got {}",
+            i,
+            output[0][i]
+        );
     }
 }

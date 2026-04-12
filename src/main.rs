@@ -1,6 +1,7 @@
 mod app;
 mod audio;
 mod crash_logger;
+mod i18n;
 mod session;
 mod ui;
 mod undo;

@@ -202,13 +202,10 @@ impl AudioGraph {
     }
 
     fn shrink_mixer_ports(&mut self, node_id: NodeId) {
-        let min_ports = self
-            .nodes
-            .get(&node_id)
-            .and_then(|n| match n.node_type {
-                NodeType::Mixer { inputs } => Some((inputs as usize).max(1)),
-                _ => None,
-            });
+        let min_ports = self.nodes.get(&node_id).and_then(|n| match n.node_type {
+            NodeType::Mixer { inputs } => Some((inputs as usize).max(1)),
+            _ => None,
+        });
         let Some(min_ports) = min_ports else {
             return;
         };

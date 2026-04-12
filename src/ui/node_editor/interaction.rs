@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
 use crate::audio::node::*;
+use crate::i18n::I18n;
 use egui::*;
 
 use super::{
-    COL_CONN, COL_CONN_HOVER, NODE_W, PARAM_SENSITIVITY, DConn, DragParam, EdCmd, NodeEditor,
-    NodeSnap,
+    DConn, DragParam, EdCmd, NodeEditor, NodeSnap, COL_CONN, COL_CONN_HOVER, NODE_W,
+    PARAM_SENSITIVITY,
 };
 
 impl NodeEditor {
@@ -15,6 +16,7 @@ impl NodeEditor {
         nodes: &[NodeSnap],
         conns: &[Connection],
         available_plugins: &[crate::vst_host::scanner::PluginInfo],
+        i18n: &I18n,
     ) -> Vec<EdCmd> {
         let mut cmds = Vec::new();
 
@@ -63,9 +65,7 @@ impl NodeEditor {
                         from,
                         to: ms,
                     });
-                } else if let Some((target_nid, target_pid)) =
-                    self.hit_in_port(nodes, ms, &vpos)
-                {
+                } else if let Some((target_nid, target_pid)) = self.hit_in_port(nodes, ms, &vpos) {
                     if let Some(conn) = conns
                         .iter()
                         .find(|c| c.target_node == target_nid && c.target_port == target_pid)
@@ -73,9 +73,7 @@ impl NodeEditor {
                         let src_pidx = nodes
                             .iter()
                             .find(|n| n.id == conn.source_node)
-                            .and_then(|n| {
-                                n.outputs.iter().position(|p| p.id == conn.source_port)
-                            });
+                            .and_then(|n| n.outputs.iter().position(|p| p.id == conn.source_port));
                         if let Some(pidx) = src_pidx {
                             let from = self.out_spos(vpos[&conn.source_node], pidx);
                             cmds.push(EdCmd::Disconnect(
@@ -276,12 +274,12 @@ impl NodeEditor {
             if let Some(ci) = menu_conn {
                 if let Some(conn) = conns.get(ci) {
                     ui.label(
-                        RichText::new("Connection")
+                        RichText::new(i18n.tr("node.connection"))
                             .strong()
                             .color(crate::ui::theme::ACCENT),
                     );
                     ui.separator();
-                    if ui.button("Delete Connection").clicked() {
+                    if ui.button(i18n.tr("node.delete_connection")).clicked() {
                         menu_cmds.push(EdCmd::Disconnect(
                             conn.source_node,
                             conn.source_port,
@@ -296,22 +294,22 @@ impl NodeEditor {
             }
 
             ui.label(
-                RichText::new("Add Node")
+                RichText::new(i18n.tr("node.add_node"))
                     .strong()
                     .color(crate::ui::theme::ACCENT),
             );
             ui.separator();
-            if ui.button("Gain").clicked() {
+            if ui.button(i18n.tr("node.gain")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(NodeType::Gain, (mw.x, mw.y)));
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Pan").clicked() {
+            if ui.button(i18n.tr("node.pan")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(NodeType::Pan, (mw.x, mw.y)));
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Splitter (2-out)").clicked() {
+            if ui.button(i18n.tr("node.splitter_2out")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(
                     NodeType::Splitter { outputs: 2 },
                     (mw.x, mw.y),
@@ -319,12 +317,12 @@ impl NodeEditor {
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Mixer (2-in)").clicked() {
+            if ui.button(i18n.tr("node.mixer_2in")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(NodeType::Mixer { inputs: 2 }, (mw.x, mw.y)));
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Converter (M\u{2192}S)").clicked() {
+            if ui.button(i18n.tr("node.converter_ms")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(
                     NodeType::ChannelConverter {
                         target: ChannelConfig::Stereo,
@@ -334,7 +332,7 @@ impl NodeEditor {
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Converter (S\u{2192}M)").clicked() {
+            if ui.button(i18n.tr("node.converter_sm")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(
                     NodeType::ChannelConverter {
                         target: ChannelConfig::Mono,
@@ -344,17 +342,17 @@ impl NodeEditor {
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Metronome").clicked() {
+            if ui.button(i18n.tr("node.metronome")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(NodeType::Metronome, (mw.x, mw.y)));
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Looper").clicked() {
+            if ui.button(i18n.tr("node.looper")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(NodeType::Looper, (mw.x, mw.y)));
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Wet/Dry").clicked() {
+            if ui.button(i18n.tr("node.wet_dry")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(NodeType::WetDry, (mw.x, mw.y)));
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
@@ -362,12 +360,12 @@ impl NodeEditor {
 
             ui.separator();
             ui.label(
-                RichText::new("Send/Return Buses")
+                RichText::new(i18n.tr("node.send_return_buses"))
                     .strong()
                     .color(crate::ui::theme::ACCENT),
             );
             ui.separator();
-            if ui.button("Send Bus #1").clicked() {
+            if ui.button(i18n.tr("node.send_bus_1")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(
                     NodeType::SendBus { bus_id: 1 },
                     (mw.x, mw.y),
@@ -375,7 +373,7 @@ impl NodeEditor {
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Return Bus #1").clicked() {
+            if ui.button(i18n.tr("node.return_bus_1")).clicked() {
                 menu_cmds.push(EdCmd::AddNode(
                     NodeType::ReturnBus { bus_id: 1 },
                     (mw.x, mw.y),
@@ -386,22 +384,22 @@ impl NodeEditor {
 
             ui.separator();
             ui.label(
-                RichText::new("Templates")
+                RichText::new(i18n.tr("node.templates"))
                     .strong()
                     .color(crate::ui::theme::ACCENT),
             );
             ui.separator();
-            if ui.button("Wide Stereo Amp").clicked() {
+            if ui.button(i18n.tr("node.wide_stereo_amp")).clicked() {
                 menu_cmds.push(EdCmd::ApplyTemplate("wide_stereo_amp".into(), (mw.x, mw.y)));
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Dry/Wet Blend").clicked() {
+            if ui.button(i18n.tr("node.dry_wet_blend")).clicked() {
                 menu_cmds.push(EdCmd::ApplyTemplate("dry_wet_blend".into(), (mw.x, mw.y)));
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Send/Return Reverb").clicked() {
+            if ui.button(i18n.tr("node.send_return_reverb")).clicked() {
                 menu_cmds.push(EdCmd::ApplyTemplate(
                     "send_return_reverb".into(),
                     (mw.x, mw.y),
@@ -409,7 +407,7 @@ impl NodeEditor {
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
-            if ui.button("Parallel Chain").clicked() {
+            if ui.button(i18n.tr("node.parallel_chain")).clicked() {
                 menu_cmds.push(EdCmd::ApplyTemplate("parallel_chain".into(), (mw.x, mw.y)));
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
@@ -418,7 +416,7 @@ impl NodeEditor {
             if !available_plugins.is_empty() {
                 ui.separator();
                 ui.label(
-                    RichText::new("VST Plugins")
+                    RichText::new(i18n.tr("node.vst_plugins"))
                         .strong()
                         .color(crate::ui::theme::ACCENT),
                 );
@@ -438,21 +436,28 @@ impl NodeEditor {
 
             if let Some(sid) = sel_id {
                 ui.separator();
-                ui.label(RichText::new("Selected Node").color(crate::ui::theme::TEXT_SECONDARY));
+                ui.label(
+                    RichText::new(i18n.tr("node.selected_node"))
+                        .color(crate::ui::theme::TEXT_SECONDARY),
+                );
                 if let Some(bp) = sel_bypassed {
-                    let text = if bp { "Unbypass" } else { "Bypass" };
+                    let text = if bp {
+                        i18n.tr("rack.unbypass")
+                    } else {
+                        i18n.tr("rack.bypass")
+                    };
                     if ui.button(text).clicked() {
                         menu_cmds.push(EdCmd::ToggleBypass(sid));
                         ui.close_menu();
                     }
                 }
                 if sel_is_io != Some(true) {
-                    if ui.button("Delete").clicked() {
+                    if ui.button(i18n.tr("node.delete")).clicked() {
                         menu_cmds.push(EdCmd::RemoveNode(sid));
                         menu_cmds.push(EdCmd::Commit);
                         ui.close_menu();
                     }
-                    if ui.button("Duplicate").clicked() {
+                    if ui.button(i18n.tr("node.duplicate")).clicked() {
                         menu_cmds.push(EdCmd::DuplicateNode(sid));
                         menu_cmds.push(EdCmd::Commit);
                         ui.close_menu();
@@ -461,12 +466,12 @@ impl NodeEditor {
             }
 
             ui.separator();
-            if ui.button("Reset View").clicked() {
+            if ui.button(i18n.tr("node.reset_view")).clicked() {
                 self.pan = Vec2::new(100.0, 100.0);
                 self.zoom = 1.0;
                 ui.close_menu();
             }
-            if ui.button("Fit All (F)").clicked() {
+            if ui.button(i18n.tr("node.fit_all")).clicked() {
                 self.zoom_to_fit(nodes, rect);
                 ui.close_menu();
             }
@@ -481,7 +486,6 @@ impl NodeEditor {
         }
         cmds.extend(menu_cmds);
 
-        // --- Painting ---
         painter.rect_filled(rect, 0.0, crate::ui::theme::BG_DARK);
         self.paint_grid(&painter, rect);
 
@@ -521,24 +525,26 @@ impl NodeEditor {
                 .as_ref()
                 .filter(|dp| dp.node_id == n.id)
                 .map(|dp| dp.current_value);
-            self.paint_node(&painter, n, vp, is_sel, is_connecting, dpv);
+            self.paint_node(&painter, n, vp, is_sel, is_connecting, dpv, i18n);
         }
 
         if nodes.is_empty() {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                "Right-click to add nodes",
+                i18n.tr("node.right_click_hint"),
                 FontId::proportional(14.0),
                 crate::ui::theme::TEXT_SECONDARY,
             );
         }
 
         if mouse.is_some() {
-            let hint = format!(
-                "Nodes: {}  Zoom: {:.0}%  LMB: select/drag  RMB: menu  Scroll: zoom  F: fit  Ctrl+D: duplicate",
-                nodes.len(),
-                self.zoom * 100.0
+            let hint = i18n.trf(
+                "node.canvas_hint",
+                &[
+                    ("count", &nodes.len().to_string()),
+                    ("zoom", &format!("{:.0}", self.zoom * 100.0)),
+                ],
             );
             painter.text(
                 pos2(rect.left() + 6.0, rect.bottom() - 16.0),

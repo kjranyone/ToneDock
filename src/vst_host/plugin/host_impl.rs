@@ -3,7 +3,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use vst3::Steinberg::Vst::{IAttributeList, IHostApplication, IMessage};
-use vst3::Steinberg::{FUnknown, kInvalidArgument, kNoInterface, kResultOk, TUID, tresult, uint32};
+use vst3::Steinberg::{kInvalidArgument, kNoInterface, kResultOk, tresult, uint32, FUnknown, TUID};
 use vst3::{ComWrapper, Interface};
 
 use super::attributes::{HostAttributeList, HostMessage};

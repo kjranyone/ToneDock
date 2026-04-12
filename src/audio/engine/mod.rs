@@ -423,7 +423,10 @@ impl AudioEngine {
         Ok(cpal::default_host())
     }
 
-    pub(crate) fn find_output_device(host: &cpal::Host, name: &str) -> anyhow::Result<cpal::Device> {
+    pub(crate) fn find_output_device(
+        host: &cpal::Host,
+        name: &str,
+    ) -> anyhow::Result<cpal::Device> {
         host.output_devices()
             .map_err(|e| anyhow::anyhow!("Cannot enumerate output devices: {}", e))?
             .find(|d| d.name().map(|n| n == name).unwrap_or(false))

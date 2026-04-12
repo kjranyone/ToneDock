@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::audio::node::*;
 use egui::*;
 
-use super::{HIT_R, PORT_R, NodeEditor, NodeSnap};
+use super::{NodeEditor, NodeSnap, HIT_R, PORT_R};
 
 impl NodeEditor {
     pub(super) fn hit_node(

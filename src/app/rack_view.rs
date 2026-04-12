@@ -42,11 +42,15 @@ impl ToneDockApp {
                 self.main_hwnd.map(|h| h.as_ptr()),
             ) {
                 Ok(()) => {
-                    self.status_message = format!("Opened editor: {}", plugin_name);
+                    self.status_message = self
+                        .i18n
+                        .trf("status.opened_editor", &[("name", &plugin_name)]);
                 }
                 Err(err) => {
                     log::error!("Failed to open editor for '{}': {}", plugin_name, err);
-                    self.status_message = format!("Editor error: {}", err);
+                    self.status_message = self
+                        .i18n
+                        .trf("status.editor_error", &[("error", &err.to_string())]);
                 }
             }
         }
@@ -115,8 +119,9 @@ impl ToneDockApp {
                 self.main_hwnd.map(|h| h.as_ptr()),
             ) {
                 Ok(()) => {
-                    self.status_message =
-                        format!("Inline GUI failed, opened separate window: {}", plugin_name);
+                    self.status_message = self
+                        .i18n
+                        .trf("status.inline_gui_fallback", &[("name", &plugin_name)]);
                 }
                 Err(sep_err) => {
                     log::error!(
@@ -124,7 +129,9 @@ impl ToneDockApp {
                         plugin_name,
                         sep_err
                     );
-                    self.status_message = format!("Editor error: {}", sep_err);
+                    self.status_message = self
+                        .i18n
+                        .trf("status.editor_error", &[("error", &sep_err.to_string())]);
                 }
             }
         }
@@ -153,16 +160,16 @@ impl ToneDockApp {
                         ui.set_min_height(full_height - 36.0);
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("DIGITAL RACK")
+                                RichText::new(self.i18n.tr("rack.digital_rack"))
                                     .size(12.0)
                                     .strong()
                                     .color(crate::ui::theme::ACCENT),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(
-                                    RichText::new(format!(
-                                        "{} plugins available",
-                                        self.available_plugins.len()
+                                    RichText::new(self.i18n.trf(
+                                        "rack.plugins_available",
+                                        &[("count", &self.available_plugins.len().to_string())],
                                     ))
                                     .size(10.0)
                                     .color(crate::ui::theme::TEXT_HINT),
@@ -176,8 +183,13 @@ impl ToneDockApp {
                         let inline_node = self
                             .inline_rack_editor_node
                             .filter(|node_id| self.rack_order.contains(node_id));
-                        let (commands, inline_rects) =
-                            self.rack_view.show(ui, &rack_slots, &available, inline_node);
+                        let (commands, inline_rects) = self.rack_view.show(
+                            ui,
+                            &rack_slots,
+                            &available,
+                            inline_node,
+                            &self.i18n,
+                        );
 
                         for (node_id, rect) in &inline_rects {
                             self.ensure_inline_rack_editor(ui, *node_id, *rect);
@@ -193,12 +205,20 @@ impl ToneDockApp {
                                         match self.add_rack_plugin_to_graph(&info) {
                                             Ok(node_id) => {
                                                 self.select_rack_plugin_node(Some(node_id));
-                                                self.status_message = format!("Loaded: {}", info.name);
+                                                self.status_message = self
+                                                    .i18n
+                                                    .trf("status.loaded", &[("name", &info.name)]);
                                             }
                                             Err(err) => {
-                                                log::error!("Load error for {}: {}", info.name, err);
-                                                self.status_message =
-                                                    format!("Load error: {}", err);
+                                                log::error!(
+                                                    "Load error for {}: {}",
+                                                    info.name,
+                                                    err
+                                                );
+                                                self.status_message = self.i18n.trf(
+                                                    "status.load_error",
+                                                    &[("error", &err.to_string())],
+                                                );
                                             }
                                         }
                                     }
@@ -209,7 +229,10 @@ impl ToneDockApp {
                                         self.select_rack_plugin_node(None);
                                     }
                                 }
-                                crate::ui::rack_view::RackCommand::Reorder(node_id, target_index) => {
+                                crate::ui::rack_view::RackCommand::Reorder(
+                                    node_id,
+                                    target_index,
+                                ) => {
                                     self.reorder_rack_plugin(node_id, target_index);
                                 }
                                 crate::ui::rack_view::RackCommand::ToggleBypass(node_id) => {
@@ -239,11 +262,11 @@ impl ToneDockApp {
                                 }
                                 crate::ui::rack_view::RackCommand::CloseEditor(node_id) => {
                                     self.close_rack_editor(node_id);
-                                    self.status_message = "Closed editor".into();
+                                    self.status_message =
+                                        self.i18n.tr("status.closed_editor").into();
                                 }
                             }
                         }
-
                     });
             });
 
@@ -261,7 +284,7 @@ impl ToneDockApp {
                     .show(ui, |ui| {
                         ui.set_min_height(full_height - 28.0);
                         ui.label(
-                            RichText::new("RACK CONTROL")
+                            RichText::new(self.i18n.tr("rack.rack_control"))
                                 .size(11.0)
                                 .strong()
                                 .color(crate::ui::theme::ACCENT),
@@ -271,7 +294,7 @@ impl ToneDockApp {
                         let (out_l, out_r) = *self.audio_engine.output_level.lock();
                         crate::ui::meters::draw_stereo_meter(
                             ui,
-                            "MASTER OUT",
+                            self.i18n.tr("rack.master_out"),
                             out_l,
                             out_r,
                             side_width - 28.0,
@@ -283,7 +306,7 @@ impl ToneDockApp {
                         let (in_l, _) = *self.audio_engine.input_level.lock();
                         crate::ui::meters::draw_mono_meter(
                             ui,
-                            "MONO INPUT",
+                            self.i18n.tr("rack.mono_input"),
                             in_l,
                             side_width - 28.0,
                             68.0,
@@ -305,17 +328,15 @@ impl ToneDockApp {
                                 .show(ui, |ui| {
                                     ui.vertical_centered(|ui| {
                                         ui.label(
-                                            RichText::new("No module selected")
+                                            RichText::new(self.i18n.tr("rack.no_module_selected"))
                                                 .size(13.0)
                                                 .color(crate::ui::theme::TEXT_SECONDARY),
                                         );
                                         ui.add_space(4.0);
                                         ui.label(
-                                            RichText::new(
-                                                "Select a rack unit to inspect and tweak parameters",
-                                            )
-                                            .size(10.0)
-                                            .color(crate::ui::theme::TEXT_HINT),
+                                            RichText::new(self.i18n.tr("rack.select_hint"))
+                                                .size(10.0)
+                                                .color(crate::ui::theme::TEXT_HINT),
                                         );
                                     });
                                 });
@@ -367,23 +388,27 @@ impl ToneDockApp {
                         ui.set_min_height(full_height - 16.0);
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("SIGNAL FLOW")
+                                RichText::new(self.i18n.tr("rack.signal_flow"))
                                     .size(12.0)
                                     .strong()
                                     .color(crate::ui::theme::ACCENT),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(
-                                    RichText::new("Hardware-style routing canvas")
+                                    RichText::new(self.i18n.tr("rack.hardware_canvas"))
                                         .size(10.0)
                                         .color(crate::ui::theme::TEXT_HINT),
                                 );
                             });
                         });
                         ui.add_space(8.0);
-                        let cmds =
-                            self.node_editor
-                                .show(ui, &snaps, &conns, &self.available_plugins);
+                        let cmds = self.node_editor.show(
+                            ui,
+                            &snaps,
+                            &conns,
+                            &self.available_plugins,
+                            &self.i18n,
+                        );
                         self.process_editor_commands(cmds);
                     });
             });
@@ -401,7 +426,7 @@ impl ToneDockApp {
                     .show(ui, |ui| {
                         ui.set_min_height(full_height - 28.0);
                         ui.label(
-                            RichText::new("NODE INSPECTOR")
+                            RichText::new(self.i18n.tr("rack.node_inspector"))
                                 .size(11.0)
                                 .strong()
                                 .color(crate::ui::theme::ACCENT),
@@ -411,7 +436,7 @@ impl ToneDockApp {
                         let (out_l, out_r) = *self.audio_engine.output_level.lock();
                         crate::ui::meters::draw_stereo_meter(
                             ui,
-                            "OUTPUT",
+                            self.i18n.tr("rack.output"),
                             out_l,
                             out_r,
                             side_width - 28.0,
@@ -421,7 +446,7 @@ impl ToneDockApp {
                         let (in_l, _) = *self.audio_engine.input_level.lock();
                         crate::ui::meters::draw_mono_meter(
                             ui,
-                            "MONO INPUT",
+                            self.i18n.tr("rack.mono_input"),
                             in_l,
                             side_width - 28.0,
                             48.0,
@@ -433,7 +458,7 @@ impl ToneDockApp {
                             self.draw_vst_parameter_panel(ui, sel_id);
                         } else {
                             ui.label(
-                                RichText::new("Select a node to inspect")
+                                RichText::new(self.i18n.tr("rack.select_node"))
                                     .size(11.0)
                                     .color(crate::ui::theme::TEXT_SECONDARY),
                             );
@@ -481,7 +506,7 @@ impl ToneDockApp {
                         );
                         ui.add_space(4.0);
                         ui.label(
-                            RichText::new("Plugin not loaded")
+                            RichText::new(self.i18n.tr("rack.plugin_not_loaded"))
                                 .size(10.0)
                                 .color(crate::ui::theme::TEXT_SECONDARY),
                         );
@@ -498,7 +523,7 @@ impl ToneDockApp {
             .corner_radius(CornerRadius::same(14))
             .show(ui, |ui| {
                 ui.label(
-                    RichText::new("PLUGIN EDITOR")
+                    RichText::new(self.i18n.tr("rack.plugin_editor"))
                         .size(10.0)
                         .color(crate::ui::theme::ACCENT)
                         .strong(),
@@ -544,7 +569,7 @@ impl ToneDockApp {
 
                 if param_infos.is_empty() {
                     ui.label(
-                        RichText::new("No exposed parameters")
+                        RichText::new(self.i18n.tr("rack.no_parameters"))
                             .size(10.0)
                             .color(crate::ui::theme::TEXT_SECONDARY),
                     );

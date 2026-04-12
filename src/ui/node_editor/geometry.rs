@@ -1,8 +1,11 @@
+use std::borrow::Cow;
+
 use crate::audio::node::*;
+use crate::i18n::I18n;
 use egui::*;
 
 use super::{
-    COL_PORT_MONO, COL_PORT_STEREO, HDR_H, NODE_W, PARAM_ROW, PORT_ROW, NodeEditor, NodeSnap,
+    NodeEditor, NodeSnap, COL_PORT_MONO, COL_PORT_STEREO, HDR_H, NODE_W, PARAM_ROW, PORT_ROW,
 };
 
 impl NodeEditor {
@@ -49,29 +52,29 @@ impl NodeEditor {
         self.w2s(Pos2::new(pos.0 + NODE_W, y))
     }
 
-    pub(super) fn node_label(t: &NodeType) -> &str {
+    pub(super) fn node_label<'a>(t: &'a NodeType, i18n: &'a I18n) -> Cow<'a, str> {
         match t {
-            NodeType::AudioInput => "Audio In",
-            NodeType::AudioOutput => "Audio Out",
-            NodeType::VstPlugin { plugin_name, .. } => plugin_name.as_str(),
-            NodeType::Gain => "Gain",
-            NodeType::Pan => "Pan",
-            NodeType::Mixer { .. } => "Mixer",
-            NodeType::Splitter { .. } => "Splitter",
-            NodeType::ChannelConverter { .. } => "Converter",
-            NodeType::Metronome => "Metronome",
-            NodeType::Looper => "Looper",
-            NodeType::WetDry => "Wet/Dry",
-            NodeType::SendBus { .. } => "Send",
-            NodeType::ReturnBus { .. } => "Return",
+            NodeType::AudioInput => Cow::Borrowed(i18n.tr("node.audio_in")),
+            NodeType::AudioOutput => Cow::Borrowed(i18n.tr("node.audio_out")),
+            NodeType::VstPlugin { plugin_name, .. } => Cow::Borrowed(plugin_name.as_str()),
+            NodeType::Gain => Cow::Borrowed(i18n.tr("node.gain")),
+            NodeType::Pan => Cow::Borrowed(i18n.tr("node.pan")),
+            NodeType::Mixer { .. } => Cow::Borrowed(i18n.tr("node.mixer")),
+            NodeType::Splitter { .. } => Cow::Borrowed(i18n.tr("node.splitter")),
+            NodeType::ChannelConverter { .. } => Cow::Borrowed(i18n.tr("node.converter")),
+            NodeType::Metronome => Cow::Borrowed(i18n.tr("node.metronome")),
+            NodeType::Looper => Cow::Borrowed(i18n.tr("node.looper")),
+            NodeType::WetDry => Cow::Borrowed(i18n.tr("node.wet_dry")),
+            NodeType::SendBus { .. } => Cow::Borrowed(i18n.tr("node.send")),
+            NodeType::ReturnBus { .. } => Cow::Borrowed(i18n.tr("node.return")),
         }
     }
 
-    pub(super) fn ch_label(c: ChannelConfig) -> &'static str {
+    pub(super) fn ch_label<'a>(c: ChannelConfig, i18n: &'a I18n) -> &'a str {
         match c {
-            ChannelConfig::Mono => "M",
-            ChannelConfig::Stereo => "S",
-            ChannelConfig::Custom(_) => "?",
+            ChannelConfig::Mono => i18n.tr("node.ch_mono"),
+            ChannelConfig::Stereo => i18n.tr("node.ch_stereo"),
+            ChannelConfig::Custom(_) => i18n.tr("node.ch_custom"),
         }
     }
 

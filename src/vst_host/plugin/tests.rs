@@ -1,10 +1,10 @@
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::AtomicUsize;
 
 use vst3::Steinberg::Vst::{IAttributeListTrait, IMessage, IMessageTrait};
-use vst3::Steinberg::{IBStream, IBStreamTrait, TUID, kResultOk};
+use vst3::Steinberg::{kResultOk, IBStream, IBStreamTrait, TUID};
 use vst3::{ComPtr, ComWrapper, Interface};
 
 use super::attributes::MemoryStream;
@@ -80,9 +80,7 @@ fn memory_stream_round_trip() {
     let mut read = 0;
     let mut out = [0u8; 4];
     assert_eq!(
-        unsafe {
-            stream_ptr.read(out.as_mut_ptr() as *mut c_void, out.len() as i32, &mut read)
-        },
+        unsafe { stream_ptr.read(out.as_mut_ptr() as *mut c_void, out.len() as i32, &mut read) },
         kResultOk
     );
     assert_eq!(read, out.len() as i32);

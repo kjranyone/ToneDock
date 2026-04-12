@@ -10,7 +10,8 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
     let Some(ref mut state) = app.preferences_state else {
         return;
     };
-    let pref_result = crate::ui::preferences::show_preferences(ctx, state, &app.available_plugins);
+    let pref_result =
+        crate::ui::preferences::show_preferences(ctx, state, &app.available_plugins, &app.i18n);
     match pref_result {
         PreferencesResult::None => {}
         PreferencesResult::AudioApply {
@@ -32,12 +33,17 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
                 input_ch,
                 output_ch,
             ) {
-                app.status_message = format!("Audio restart error: {}", e);
+                app.status_message = app
+                    .i18n
+                    .trf("status.audio_restart_error", &[("error", &e.to_string())]);
                 log::error!("Audio restart failed: {}", e);
             } else {
-                app.status_message = format!(
-                    "Audio: {}Hz, buffer {}",
-                    app.audio_engine.sample_rate as u32, app.audio_engine.buffer_size,
+                app.status_message = app.i18n.trf(
+                    "status.audio_info_short",
+                    &[
+                        ("sr", &(app.audio_engine.sample_rate as u32).to_string()),
+                        ("buffer", &app.audio_engine.buffer_size.to_string()),
+                    ],
                 );
             }
             app.preferences_state = None;
@@ -50,7 +56,10 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
             app.custom_plugin_paths = state.custom_plugin_paths.clone();
             app.scan_plugins_with_custom_paths();
             if let Some(ref mut s) = app.preferences_state {
-                s.scan_status = format!("Found {} plugins", app.available_plugins.len());
+                s.scan_status = app.i18n.trf(
+                    "status.found_plugins",
+                    &[("count", &app.available_plugins.len().to_string())],
+                );
             }
         }
         PreferencesResult::AddPluginPath(path) => {
@@ -75,22 +84,31 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
                         app.available_plugins.push(p);
                     }
                 }
-                app.status_message = format!("Added {} plugins from custom path", new_count);
+                app.status_message = app.i18n.trf(
+                    "status.added_plugins_path",
+                    &[("count", &new_count.to_string())],
+                );
             } else {
-                app.status_message = "No plugins found in selected path".into();
+                app.status_message = app.i18n.tr("status.no_plugins_path").into();
             }
             if let Some(ref mut s) = app.preferences_state {
-                s.scan_status = format!("Found {} plugins", app.available_plugins.len());
+                s.scan_status = app.i18n.trf(
+                    "status.found_plugins",
+                    &[("count", &app.available_plugins.len().to_string())],
+                );
             }
         }
         PreferencesResult::SetInlineRackPluginGui(enabled) => {
             app.inline_rack_plugin_gui = enabled;
             app.close_all_rack_editors();
             app.status_message = if enabled {
-                "Rack GUI mode: inline".into()
+                app.i18n.tr("status.rack_gui_inline").into()
             } else {
-                "Rack GUI mode: separate window".into()
+                app.i18n.tr("status.rack_gui_separate").into()
             };
+        }
+        PreferencesResult::SetLanguage(lang) => {
+            app.set_language(lang);
         }
     }
 }
@@ -100,7 +118,7 @@ pub(super) fn draw_about_dialog(app: &mut ToneDockApp, ctx: &Context) {
         return;
     }
     let mut open = app.show_about;
-    Window::new("About ToneDock")
+    Window::new(app.i18n.tr("dialog.about_title"))
         .open(&mut open)
         .resizable(false)
         .collapsible(false)
@@ -109,36 +127,42 @@ pub(super) fn draw_about_dialog(app: &mut ToneDockApp, ctx: &Context) {
             ui.vertical_centered(|ui| {
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("ToneDock")
+                    RichText::new(app.i18n.tr("app.title"))
                         .size(24.0)
                         .color(crate::ui::theme::ACCENT)
                         .strong(),
                 );
                 ui.add_space(4.0);
-                ui.label("v0.1.0");
+                ui.label(app.i18n.tr("dialog.version"));
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new("A guitar practice VST3 host application")
+                    RichText::new(app.i18n.tr("dialog.description"))
                         .size(11.0)
                         .color(crate::ui::theme::TEXT_SECONDARY),
                 );
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("GPL-3.0 License")
+                    RichText::new(app.i18n.tr("dialog.license"))
                         .size(10.0)
                         .color(crate::ui::theme::TEXT_SECONDARY),
                 );
                 ui.add_space(12.0);
-                ui.label(format!(
-                    "Audio: {:.0} Hz / {} buffer",
-                    app.audio_engine.sample_rate, app.audio_engine.buffer_size
+                ui.label(app.i18n.trf(
+                    "dialog.audio_info",
+                    &[
+                        ("sr", &format!("{:.0}", app.audio_engine.sample_rate)),
+                        ("buffer", &app.audio_engine.buffer_size.to_string()),
+                    ],
                 ));
                 ui.add_space(4.0);
-                ui.label(format!("Plugins scanned: {}", app.available_plugins.len()));
+                ui.label(app.i18n.trf(
+                    "dialog.plugins_scanned",
+                    &[("count", &app.available_plugins.len().to_string())],
+                ));
                 ui.add_space(4.0);
-                ui.label(format!(
-                    "Rack slots: {}",
-                    app.audio_engine.chain_node_ids.len()
+                ui.label(app.i18n.trf(
+                    "dialog.rack_slots",
+                    &[("count", &app.audio_engine.chain_node_ids.len().to_string())],
                 ));
             });
         });

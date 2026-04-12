@@ -1,9 +1,10 @@
 use crate::audio::node::*;
+use crate::i18n::I18n;
 use egui::*;
 
 use super::{
-    COL_GRID, COL_NODE_BG, COL_NODE_HDR, COL_PARAM_BG, GRID_STEP, HDR_H, PORT_R, NodeEditor,
-    NodeSnap,
+    NodeEditor, NodeSnap, COL_GRID, COL_NODE_BG, COL_NODE_HDR, COL_PARAM_BG, GRID_STEP, HDR_H,
+    PORT_R,
 };
 
 impl NodeEditor {
@@ -72,6 +73,7 @@ impl NodeEditor {
         selected: bool,
         is_connect_target: bool,
         drag_param_value: Option<f32>,
+        i18n: &I18n,
     ) {
         let h = Self::node_h(n);
         let r = self.node_srect(vpos, h);
@@ -136,7 +138,7 @@ impl NodeEditor {
         p.text(
             pos2(r.min.x + 6.0, r.min.y + (HDR_H * z - fs) * 0.5),
             Align2::LEFT_TOP,
-            Self::node_label(&n.node_type),
+            Self::node_label(&n.node_type, i18n),
             FontId::proportional(fs),
             crate::ui::theme::TEXT_PRIMARY,
         );
@@ -159,7 +161,7 @@ impl NodeEditor {
             p.text(
                 pos2(pp.x + port_r + 3.0, pp.y - port_fs * 0.5),
                 Align2::LEFT_TOP,
-                format!("{} ({})", port.name, Self::ch_label(port.channels)),
+                format!("{} ({})", port.name, Self::ch_label(port.channels, i18n)),
                 FontId::proportional(port_fs),
                 crate::ui::theme::TEXT_SECONDARY,
             );
@@ -197,7 +199,7 @@ impl NodeEditor {
             p.text(
                 pos2(pp.x - port_r - 3.0, pp.y - port_fs * 0.5),
                 Align2::RIGHT_TOP,
-                format!("{} ({})", port.name, Self::ch_label(port.channels)),
+                format!("{} ({})", port.name, Self::ch_label(port.channels, i18n)),
                 FontId::proportional(port_fs),
                 crate::ui::theme::TEXT_SECONDARY,
             );
@@ -258,11 +260,17 @@ impl NodeEditor {
                     p.rect_filled(bar_rect, 5.0, Color32::from_rgb(14, 14, 18));
                     p.rect_filled(fill_r, 4.0, crate::ui::theme::ACCENT_DIM);
                     let label = if value < -0.01 {
-                        format!("L {:.2}", value.abs())
+                        i18n.trf(
+                            "node.pan_left",
+                            &[("value", &format!("{:.2}", value.abs()))],
+                        )
                     } else if value > 0.01 {
-                        format!("R {:.2}", value.abs())
+                        i18n.trf(
+                            "node.pan_right",
+                            &[("value", &format!("{:.2}", value.abs()))],
+                        )
                     } else {
-                        "C".into()
+                        i18n.tr("node.pan_center").into()
                     };
                     p.text(
                         pos2(param_r.min.x + padding, bar_rect.min.y - param_fs - 1.0 * z),
@@ -281,7 +289,10 @@ impl NodeEditor {
                     );
                     p.rect_filled(bar_rect, 5.0, Color32::from_rgb(14, 14, 18));
                     p.rect_filled(fill_r, 4.0, crate::ui::theme::ACCENT_DIM);
-                    let label = format!("Wet {:.0}%", value * 100.0);
+                    let label = i18n.trf(
+                        "node.wet_percent",
+                        &[("value", &format!("{:.0}", value * 100.0))],
+                    );
                     p.text(
                         pos2(param_r.min.x + padding, bar_rect.min.y - param_fs - 1.0 * z),
                         Align2::LEFT_BOTTOM,
@@ -299,7 +310,10 @@ impl NodeEditor {
                     );
                     p.rect_filled(bar_rect, 5.0, Color32::from_rgb(14, 14, 18));
                     p.rect_filled(fill_r, 4.0, crate::ui::theme::ACCENT_DIM);
-                    let label = format!("Send {:.0}%", value * 100.0);
+                    let label = i18n.trf(
+                        "node.send_percent",
+                        &[("value", &format!("{:.0}", value * 100.0))],
+                    );
                     p.text(
                         pos2(param_r.min.x + padding, bar_rect.min.y - param_fs - 1.0 * z),
                         Align2::LEFT_BOTTOM,

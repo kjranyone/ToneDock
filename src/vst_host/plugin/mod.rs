@@ -12,11 +12,9 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::AtomicUsize;
 
-use vst3::Steinberg::Vst::{
-    IAudioProcessor, IComponent, IConnectionPoint, IEditController,
-};
+use vst3::Steinberg::Vst::{IAudioProcessor, IComponent, IConnectionPoint, IEditController};
 use vst3::Steinberg::{
-    IBStream, PClassInfo, kNoInterface, kNotImplemented, kResultFalse, kResultOk,
+    kNoInterface, kNotImplemented, kResultFalse, kResultOk, IBStream, PClassInfo,
 };
 use vst3::{ComPtr, ComWrapper};
 

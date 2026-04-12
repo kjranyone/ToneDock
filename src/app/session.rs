@@ -5,8 +5,11 @@ use crate::session::{Preset, Session};
 impl ToneDockApp {
     pub(crate) fn save_preset(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("ToneDock Preset", &["tonedock-preset.json"])
-            .set_file_name("preset.tonedock-preset.json")
+            .add_filter(
+                self.i18n.tr("file.tonedock_preset"),
+                &["tonedock-preset.json"],
+            )
+            .set_file_name(self.i18n.tr("file.default_filename"))
             .save_file()
         {
             let preset = self.build_preset();
@@ -18,14 +21,17 @@ impl ToneDockApp {
                 }
             });
             self.preset_name = preset_name;
-            self.status_message = format!("Preset saved to {}", path.display());
+            self.status_message = self.i18n.trf(
+                "status.preset_saved",
+                &[("path", &path.display().to_string())],
+            );
         }
     }
 
     pub(crate) fn load_preset(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
-                "ToneDock Preset",
+                self.i18n.tr("file.tonedock_preset"),
                 &["tonedock-preset.json", "tonedock.json"],
             )
             .pick_file()
@@ -35,15 +41,22 @@ impl ToneDockApp {
                 Err(preset_err) => match Session::load_from_file(&path) {
                     Ok(session) => session.preset,
                     Err(session_err) => {
-                        self.status_message =
-                            format!("Preset load error: {} / {}", preset_err, session_err);
+                        self.status_message = self.i18n.trf(
+                            "status.preset_load_error_both",
+                            &[
+                                ("err1", &preset_err.to_string()),
+                                ("err2", &session_err.to_string()),
+                            ],
+                        );
                         return;
                     }
                 },
             };
 
             if let Err(err) = self.audio_engine.load_serialized_graph(&preset.graph) {
-                self.status_message = format!("Preset load error: {}", err);
+                self.status_message = self
+                    .i18n
+                    .trf("status.preset_load_error", &[("error", &err.to_string())]);
                 return;
             }
 
@@ -53,13 +66,15 @@ impl ToneDockApp {
             self.select_rack_plugin_node(None);
             self.preset_name = preset.name.clone();
             self.sync_transport_state_from_graph();
-            self.status_message = format!("Preset loaded: {}", preset.name);
+            self.status_message = self
+                .i18n
+                .trf("status.preset_loaded", &[("name", &preset.name)]);
         }
     }
 
     pub(crate) fn build_preset(&self) -> Preset {
         let preset_name = if self.preset_name.is_empty() {
-            "Untitled".into()
+            self.i18n.tr("file.untitled").into()
         } else {
             self.preset_name.clone()
         };
@@ -73,7 +88,7 @@ impl ToneDockApp {
 
     pub(crate) fn import_session(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("ToneDock Session", &["tonedock.json"])
+            .add_filter(self.i18n.tr("file.tonedock_session"), &["tonedock.json"])
             .pick_file()
         {
             match Session::load_from_file(&path) {
@@ -82,7 +97,10 @@ impl ToneDockApp {
                         .audio_engine
                         .load_serialized_graph(&session.preset.graph)
                     {
-                        self.status_message = format!("Session import error: {}", err);
+                        self.status_message = self.i18n.trf(
+                            "status.session_import_error",
+                            &[("error", &err.to_string())],
+                        );
                         return;
                     }
 
@@ -92,10 +110,16 @@ impl ToneDockApp {
                     self.select_rack_plugin_node(None);
                     self.preset_name = session.preset.name;
                     self.sync_transport_state_from_graph();
-                    self.status_message = format!("Imported preset from {}", path.display());
+                    self.status_message = self.i18n.trf(
+                        "status.imported_preset",
+                        &[("path", &path.display().to_string())],
+                    );
                 }
                 Err(err) => {
-                    self.status_message = format!("Session import error: {}", err);
+                    self.status_message = self.i18n.trf(
+                        "status.session_import_error",
+                        &[("error", &err.to_string())],
+                    );
                 }
             }
         }

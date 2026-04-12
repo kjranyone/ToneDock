@@ -19,7 +19,9 @@ impl ToneDockApp {
                         node_type,
                         position: pos,
                     });
-                    self.status_message = format!("Added node {:?}", id);
+                    self.status_message = self
+                        .i18n
+                        .trf("status.added_node", &[("id", &format!("{:?}", id))]);
                 }
                 EdCmd::AddVstNode {
                     plugin_path,
@@ -49,10 +51,14 @@ impl ToneDockApp {
                     ) {
                         Ok(()) => {
                             self.node_editor.set_selection(Some(id));
-                            self.status_message = format!("Loaded VST: {}", plugin_name);
+                            self.status_message = self
+                                .i18n
+                                .trf("status.loaded_vst", &[("name", &plugin_name)]);
                         }
                         Err(e) => {
-                            self.status_message = format!("VST load error: {}", e);
+                            self.status_message = self
+                                .i18n
+                                .trf("status.vst_load_error", &[("error", &e.to_string())]);
                             log::error!("Failed to load VST plugin '{}': {}", plugin_name, e);
                         }
                     }
@@ -93,13 +99,15 @@ impl ToneDockApp {
                     }
                     self.audio_engine.graph_remove_node(id);
                     self.audio_engine.apply_commands_to_staging();
-                    self.status_message = format!("Removed node {:?}", id);
+                    self.status_message = self
+                        .i18n
+                        .trf("status.removed_node", &[("id", &format!("{:?}", id))]);
                 }
                 EdCmd::Connect(conn) => {
                     undo_actions.push(UndoAction::Connected(conn.clone()));
                     self.audio_engine.graph_connect(conn);
                     self.audio_engine.apply_commands_to_staging();
-                    self.status_message = "Connected".into();
+                    self.status_message = self.i18n.tr("status.connected").into();
                 }
                 EdCmd::Disconnect(src_node, src_port, tgt_node, tgt_port) => {
                     let conn = Connection {
@@ -112,7 +120,7 @@ impl ToneDockApp {
                     self.audio_engine
                         .graph_disconnect((src_node, src_port), (tgt_node, tgt_port));
                     self.audio_engine.apply_commands_to_staging();
-                    self.status_message = "Disconnected".into();
+                    self.status_message = self.i18n.tr("status.disconnected").into();
                 }
                 EdCmd::SetPos(id, x, y) => {
                     let old_pos = {
@@ -182,7 +190,10 @@ impl ToneDockApp {
                             position: (ox + 50.0, oy + 50.0),
                         });
                         self.node_editor.set_selection(Some(new_id));
-                        self.status_message = format!("Duplicated node {:?}", new_id);
+                        self.status_message = self.i18n.trf(
+                            "status.duplicated_node",
+                            &[("id", &format!("{:?}", new_id))],
+                        );
                     }
                 }
                 EdCmd::SetVstParameter {
@@ -205,34 +216,34 @@ impl ToneDockApp {
 
         if !undo_actions.is_empty() {
             let label = if is_continuous {
-                "Change Parameter".into()
+                self.i18n.tr("undo.change_parameter").into()
             } else if undo_actions
                 .iter()
                 .any(|a| matches!(a, UndoAction::AddedNode { .. }))
             {
-                "Add Node".into()
+                self.i18n.tr("undo.add_node").into()
             } else if undo_actions
                 .iter()
                 .any(|a| matches!(a, UndoAction::RemovedNode { .. }))
             {
-                "Remove Node".into()
+                self.i18n.tr("undo.remove_node").into()
             } else if undo_actions
                 .iter()
                 .any(|a| matches!(a, UndoAction::Connected(_)))
             {
-                "Connect".into()
+                self.i18n.tr("undo.connect").into()
             } else if undo_actions
                 .iter()
                 .any(|a| matches!(a, UndoAction::Disconnected(_)))
             {
-                "Disconnect".into()
+                self.i18n.tr("undo.disconnect").into()
             } else if undo_actions
                 .iter()
                 .any(|a| matches!(a, UndoAction::MovedNode { .. }))
             {
-                "Move Node".into()
+                self.i18n.tr("undo.move_node").into()
             } else {
-                "Edit".into()
+                self.i18n.tr("undo.edit").into()
             };
 
             self.undo_manager.push(UndoStep {
@@ -247,14 +258,14 @@ impl ToneDockApp {
         if let Some(step) = self.undo_manager.pop_undo() {
             let actions: Vec<UndoAction> = step.actions.into_iter().rev().collect();
             self.audio_engine.execute_undo_actions(&actions);
-            self.status_message = format!("Undo: {}", step.label);
+            self.status_message = self.i18n.trf("status.undo", &[("label", &step.label)]);
         }
     }
 
     pub(crate) fn perform_redo(&mut self) {
         if let Some(step) = self.undo_manager.pop_redo() {
             self.audio_engine.execute_redo_actions(&step.actions);
-            self.status_message = format!("Redo: {}", step.label);
+            self.status_message = self.i18n.trf("status.redo", &[("label", &step.label)]);
         }
     }
 }

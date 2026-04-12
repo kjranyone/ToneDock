@@ -349,16 +349,14 @@ mod tests {
         assert_eq!(g.nodes.len(), 4);
         assert_eq!(g.connections.len(), 3);
 
-        assert!(
-            g.nodes
-                .iter()
-                .any(|n| matches!(n.node_type, NodeType::AudioInput))
-        );
-        assert!(
-            g.nodes
-                .iter()
-                .any(|n| matches!(n.node_type, NodeType::AudioOutput))
-        );
+        assert!(g
+            .nodes
+            .iter()
+            .any(|n| matches!(n.node_type, NodeType::AudioInput)));
+        assert!(g
+            .nodes
+            .iter()
+            .any(|n| matches!(n.node_type, NodeType::AudioOutput)));
         assert!(g.nodes.iter().any(|n| matches!(
             &n.node_type,
             NodeType::VstPlugin {

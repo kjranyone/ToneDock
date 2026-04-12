@@ -50,17 +50,17 @@ impl ToneDockApp {
             let guard = self.audio_engine.graph.load();
             Self::discover_serial_rack_chain(&guard, self.audio_engine.master_mixer_id)
                 .unwrap_or_else(|| {
-                self.audio_engine
-                    .chain_node_ids
-                    .iter()
-                    .copied()
-                    .filter(|node_id| {
-                        guard.get_node(*node_id).is_some_and(|node| {
-                            matches!(node.node_type, NodeType::VstPlugin { .. })
+                    self.audio_engine
+                        .chain_node_ids
+                        .iter()
+                        .copied()
+                        .filter(|node_id| {
+                            guard.get_node(*node_id).is_some_and(|node| {
+                                matches!(node.node_type, NodeType::VstPlugin { .. })
+                            })
                         })
-                    })
-                    .collect()
-            })
+                        .collect()
+                })
         };
 
         self.audio_engine.chain_node_ids = ordered_ids;

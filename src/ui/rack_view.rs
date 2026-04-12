@@ -1,4 +1,5 @@
 use crate::audio::node::NodeId;
+use crate::i18n::I18n;
 use crate::vst_host::scanner::PluginInfo;
 use egui::*;
 
@@ -45,26 +46,25 @@ impl RackView {
         rack_slots: &[RackSlotView],
         available_plugins: &[PluginInfo],
         inline_editor_node: Option<NodeId>,
+        i18n: &I18n,
     ) -> (Vec<RackCommand>, Vec<(NodeId, Rect)>) {
         let mut commands = Vec::new();
         let mut inline_rects: Vec<(NodeId, Rect)> = Vec::new();
 
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("PLUGIN CHAIN")
+                RichText::new(i18n.tr("rack.plugin_chain"))
                     .size(11.0)
                     .color(crate::ui::theme::ACCENT),
             );
             ui.add_space(8.0);
 
-            ui.menu_button(RichText::new("+ Add Plugin").size(12.0), |ui| {
+            ui.menu_button(RichText::new(i18n.tr("rack.add_plugin")).size(12.0), |ui| {
                 if available_plugins.is_empty() {
                     ui.label(
-                        RichText::new(
-                            "No plugins found.\nOpen Settings -> Plugins\nto add VST3 paths.",
-                        )
-                        .size(10.0)
-                        .color(crate::ui::theme::TEXT_SECONDARY),
+                        RichText::new(i18n.tr("rack.no_plugins_hint"))
+                            .size(10.0)
+                            .color(crate::ui::theme::TEXT_SECONDARY),
                     );
                 }
                 for (i, plugin) in available_plugins.iter().enumerate() {
@@ -171,13 +171,13 @@ impl RackView {
                                 }
                                 if slot.loaded {
                                     ui.label(
-                                        RichText::new("Loaded")
+                                        RichText::new(i18n.tr("rack.loaded"))
                                             .size(9.0)
                                             .color(crate::ui::theme::METER_GREEN),
                                     );
                                 } else {
                                     ui.label(
-                                        RichText::new("Not loaded")
+                                        RichText::new(i18n.tr("rack.not_loaded"))
                                             .size(9.0)
                                             .color(crate::ui::theme::METER_RED),
                                     );
@@ -188,21 +188,29 @@ impl RackView {
                                 if ui.button(RichText::new("X").size(11.0)).clicked() {
                                     commands.push(RackCommand::Remove(slot.node_id));
                                 }
-                                let bypass_text = if slot.bypassed { "Unbypass" } else { "Bypass" };
+                                let bypass_text = if slot.bypassed {
+                                    i18n.tr("rack.unbypass")
+                                } else {
+                                    i18n.tr("rack.bypass")
+                                };
                                 if ui.button(RichText::new(bypass_text).size(11.0)).clicked() {
                                     commands.push(RackCommand::ToggleBypass(slot.node_id));
                                 }
-                                let enable_text = if slot.enabled { "Disable" } else { "Enable" };
+                                let enable_text = if slot.enabled {
+                                    i18n.tr("rack.disable")
+                                } else {
+                                    i18n.tr("rack.enable")
+                                };
                                 if ui.button(RichText::new(enable_text).size(11.0)).clicked() {
                                     commands.push(RackCommand::ToggleEnable(slot.node_id));
                                 }
 
                                 if slot.has_editor {
                                     if slot.editor_open {
-                                        if ui.button("Close GUI").clicked() {
+                                        if ui.button(i18n.tr("rack.close_gui")).clicked() {
                                             commands.push(RackCommand::CloseEditor(slot.node_id));
                                         }
-                                    } else if ui.button("Open GUI").clicked() {
+                                    } else if ui.button(i18n.tr("rack.open_gui")).clicked() {
                                         commands.push(RackCommand::OpenEditor(slot.node_id));
                                     }
                                 }
@@ -293,17 +301,15 @@ impl RackView {
                         .show(ui, |ui| {
                             ui.vertical_centered(|ui| {
                                 ui.label(
-                                    RichText::new("No rack plugins")
+                                    RichText::new(i18n.tr("rack.no_rack_plugins"))
                                         .size(16.0)
                                         .color(crate::ui::theme::TEXT_SECONDARY),
                                 );
                                 ui.add_space(4.0);
                                 ui.label(
-                                    RichText::new(
-                                        "Load plugins to build the main serial rack chain",
-                                    )
-                                    .size(10.0)
-                                    .color(crate::ui::theme::TEXT_HINT),
+                                    RichText::new(i18n.tr("rack.empty_hint"))
+                                        .size(10.0)
+                                        .color(crate::ui::theme::TEXT_HINT),
                                 );
                             });
                         });

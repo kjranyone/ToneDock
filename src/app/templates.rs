@@ -74,7 +74,7 @@ impl ToneDockApp {
                 });
                 self.audio_engine.graph_commit_topology();
                 self.audio_engine.apply_commands_to_staging();
-                self.status_message = "Template: Wide Stereo Amp applied".into();
+                self.status_message = self.i18n.tr("template.wide_stereo").into();
             }
             "dry_wet_blend" => {
                 let splitter_id = self.audio_engine.add_node_with_position(
@@ -111,7 +111,7 @@ impl ToneDockApp {
                 });
                 self.audio_engine.graph_commit_topology();
                 self.audio_engine.apply_commands_to_staging();
-                self.status_message = "Template: Dry/Wet Blend applied".into();
+                self.status_message = self.i18n.tr("template.dry_wet").into();
             }
             "mono_stereo_reverb" => {
                 let converter_id = self.audio_engine.add_node_with_position(
@@ -130,7 +130,7 @@ impl ToneDockApp {
                 });
                 self.audio_engine.graph_commit_topology();
                 self.audio_engine.apply_commands_to_staging();
-                self.status_message = "Template: Mono→Stereo Reverb applied".into();
+                self.status_message = self.i18n.tr("template.mono_stereo_reverb").into();
             }
             "send_return_reverb" => {
                 let send_id = self.audio_engine.add_node_with_position(
@@ -169,7 +169,7 @@ impl ToneDockApp {
                 });
                 self.audio_engine.graph_commit_topology();
                 self.audio_engine.apply_commands_to_staging();
-                self.status_message = "Template: Send/Return Reverb applied".into();
+                self.status_message = self.i18n.tr("template.send_return").into();
             }
             "parallel_chain" => {
                 let splitter_id = self.audio_engine.add_node_with_position(
@@ -237,10 +237,10 @@ impl ToneDockApp {
                 });
                 self.audio_engine.graph_commit_topology();
                 self.audio_engine.apply_commands_to_staging();
-                self.status_message = "Template: Parallel Chain applied".into();
+                self.status_message = self.i18n.tr("template.parallel").into();
             }
             _ => {
-                self.status_message = format!("Unknown template: {}", name);
+                self.status_message = self.i18n.trf("template.unknown", &[("name", name)]);
             }
         }
     }

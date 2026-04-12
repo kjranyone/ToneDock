@@ -1,7 +1,7 @@
 use egui::*;
 
 use super::ToneDockApp;
-use crate::audio::node::{LooperNodeState, NodeInternalState, MetronomeNodeState};
+use crate::audio::node::{LooperNodeState, MetronomeNodeState, NodeInternalState};
 
 use super::toolbar::ui_section_frame;
 
@@ -47,7 +47,7 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                 ui_section_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("METRONOME")
+                            RichText::new(app.i18n.tr("transport.metronome"))
                                 .size(9.0)
                                 .color(crate::ui::theme::ACCENT),
                         );
@@ -71,7 +71,7 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                             }
                         }
 
-                        ui.label("BPM");
+                        ui.label(app.i18n.tr("transport.bpm"));
                         let mut bpm = app.metronome_bpm;
                         ui.add_sized(
                             [56.0, 24.0],
@@ -92,7 +92,7 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                             }
                         }
 
-                        ui.label("Vol");
+                        ui.label(app.i18n.tr("transport.vol"));
                         let mut vol = app.metronome_volume;
                         ui.add_sized([74.0, 22.0], egui::Slider::new(&mut vol, 0.0..=1.0));
                         if (vol - app.metronome_volume).abs() > 0.001 {
@@ -113,7 +113,7 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                 ui_section_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("LOOPER")
+                            RichText::new(app.i18n.tr("transport.looper"))
                                 .size(10.0)
                                 .color(crate::ui::theme::ACCENT),
                         );
@@ -162,7 +162,10 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                             crate::ui::theme::SURFACE_CONTAINER_HIGH
                         };
                         if ui
-                            .add_sized([48.0, 28.0], Button::new("Rec").fill(rec_fill))
+                            .add_sized(
+                                [48.0, 28.0],
+                                Button::new(app.i18n.tr("transport.rec")).fill(rec_fill),
+                            )
                             .clicked()
                         {
                             if app.looper_node_id.is_none() {
@@ -193,7 +196,10 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                             crate::ui::theme::SURFACE_CONTAINER_HIGH
                         };
                         if ui
-                            .add_sized([50.0, 28.0], Button::new("Play").fill(play_fill))
+                            .add_sized(
+                                [50.0, 28.0],
+                                Button::new(app.i18n.tr("transport.play")).fill(play_fill),
+                            )
                             .clicked()
                         {
                             if app.looper_node_id.is_none() {
@@ -223,7 +229,10 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                             crate::ui::theme::SURFACE_CONTAINER_HIGH
                         };
                         if ui
-                            .add_sized([68.0, 28.0], Button::new("Overdub").fill(dub_fill))
+                            .add_sized(
+                                [68.0, 28.0],
+                                Button::new(app.i18n.tr("transport.overdub")).fill(dub_fill),
+                            )
                             .clicked()
                         {
                             app.looper_overdubbing = if app.looper_overdubbing {
@@ -247,7 +256,10 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                             }
                         }
 
-                        if ui.add_sized([52.0, 28.0], Button::new("Clear")).clicked() {
+                        if ui
+                            .add_sized([52.0, 28.0], Button::new(app.i18n.tr("transport.clear")))
+                            .clicked()
+                        {
                             app.looper_recording = false;
                             app.looper_playing = false;
                             app.looper_overdubbing = false;
@@ -277,20 +289,23 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                 let sr = app.audio_engine.sample_rate;
                                 let secs = loop_samples as f64 / sr;
                                 ui.label(
-                                    RichText::new(format!("Loop {:.1}s", secs))
-                                        .size(10.0)
-                                        .color(crate::ui::theme::TEXT_SECONDARY),
+                                    RichText::new(app.i18n.trf(
+                                        "transport.loop_duration",
+                                        &[("duration", &format!("{:.1}", secs))],
+                                    ))
+                                    .size(10.0)
+                                    .color(crate::ui::theme::TEXT_SECONDARY),
                                 );
                             } else {
                                 ui.label(
-                                    RichText::new("Transport idle")
+                                    RichText::new(app.i18n.tr("transport.idle"))
                                         .size(10.0)
                                         .color(crate::ui::theme::TEXT_HINT),
                                 );
                             }
                         } else {
                             ui.label(
-                                RichText::new("Transport idle")
+                                RichText::new(app.i18n.tr("transport.idle"))
                                     .size(10.0)
                                     .color(crate::ui::theme::TEXT_HINT),
                             );

@@ -1,8 +1,8 @@
 use std::ffi::c_void;
 
-use vst3::Steinberg::Vst::{self, AudioBusBuffers, AudioBusBuffers__type0, ProcessSetup};
-use vst3::Steinberg::{IBStream, kNotImplemented, kResultFalse, kResultOk};
 use vst3::ComWrapper;
+use vst3::Steinberg::Vst::{self, AudioBusBuffers, AudioBusBuffers__type0, ProcessSetup};
+use vst3::Steinberg::{kNotImplemented, kResultFalse, kResultOk, IBStream};
 
 use super::attributes::MemoryStream;
 use super::seh_ffi::*;

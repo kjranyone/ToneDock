@@ -96,13 +96,13 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
 
                 ui.vertical(|ui| {
                     ui.label(
-                        RichText::new("ToneDock")
+                        RichText::new(app.i18n.tr("app.title"))
                             .size(19.0)
                             .color(crate::ui::theme::ACCENT)
                             .strong(),
                     );
                     ui.label(
-                        RichText::new("Digital Guitar Rack")
+                        RichText::new(app.i18n.tr("app.subtitle"))
                             .size(10.0)
                             .color(crate::ui::theme::TEXT_HINT),
                     );
@@ -113,20 +113,20 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                 ui_section_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("FILE")
+                            RichText::new(app.i18n.tr("toolbar.file"))
                                 .size(9.0)
                                 .color(crate::ui::theme::TEXT_HINT),
                         );
-                        if ui.button("Save Preset").clicked() {
+                        if ui.button(app.i18n.tr("toolbar.save_preset")).clicked() {
                             app.save_preset();
                         }
-                        if ui.button("Load Preset").clicked() {
+                        if ui.button(app.i18n.tr("toolbar.load_preset")).clicked() {
                             app.load_preset();
                         }
-                        if ui.button("Import Session").clicked() {
+                        if ui.button(app.i18n.tr("toolbar.import_session")).clicked() {
                             app.import_session();
                         }
-                        if ui.button("Settings").clicked() {
+                        if ui.button(app.i18n.tr("toolbar.settings")).clicked() {
                             app.open_preferences();
                         }
                     });
@@ -135,12 +135,16 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                 ui_section_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("ENGINE")
+                            RichText::new(app.i18n.tr("toolbar.engine"))
                                 .size(9.0)
                                 .color(crate::ui::theme::TEXT_HINT),
                         );
                         let running = app.audio_engine.is_running();
-                        let label = if running { "Stop Audio" } else { "Start Audio" };
+                        let label = if running {
+                            app.i18n.tr("toolbar.stop_audio")
+                        } else {
+                            app.i18n.tr("toolbar.start_audio")
+                        };
                         if ui
                             .add_sized(
                                 [92.0, 28.0],
@@ -160,7 +164,7 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                         }
 
                         ui.label(
-                            RichText::new("Master")
+                            RichText::new(app.i18n.tr("toolbar.master"))
                                 .size(10.0)
                                 .color(crate::ui::theme::TEXT_SECONDARY),
                         );
@@ -177,7 +181,7 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                         }
 
                         ui.label(
-                            RichText::new("Gain")
+                            RichText::new(app.i18n.tr("toolbar.gain"))
                                 .size(10.0)
                                 .color(crate::ui::theme::TEXT_SECONDARY),
                         );
@@ -196,13 +200,13 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                 ui_section_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("VIEW")
+                            RichText::new(app.i18n.tr("toolbar.view"))
                                 .size(9.0)
                                 .color(crate::ui::theme::TEXT_HINT),
                         );
                         let view_label = match app.view_mode {
-                            ViewMode::Rack => "Node View",
-                            ViewMode::NodeEditor => "Rack View",
+                            ViewMode::Rack => app.i18n.tr("toolbar.node_view"),
+                            ViewMode::NodeEditor => app.i18n.tr("toolbar.rack_view"),
                         };
                         if ui.button(view_label).clicked() {
                             app.view_mode = match app.view_mode {
@@ -223,7 +227,7 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                                 }
                             };
                         }
-                        if ui.button("About").clicked() {
+                        if ui.button(app.i18n.tr("toolbar.about")).clicked() {
                             app.show_about = true;
                         }
                     });
@@ -232,7 +236,7 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                 ui_section_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("EDIT")
+                            RichText::new(app.i18n.tr("toolbar.edit"))
                                 .size(9.0)
                                 .color(crate::ui::theme::TEXT_HINT),
                         );
