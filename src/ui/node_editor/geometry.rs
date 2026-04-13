@@ -67,6 +67,9 @@ impl NodeEditor {
             NodeType::WetDry => Cow::Borrowed(i18n.tr("node.wet_dry")),
             NodeType::SendBus { .. } => Cow::Borrowed(i18n.tr("node.send")),
             NodeType::ReturnBus { .. } => Cow::Borrowed(i18n.tr("node.return")),
+            NodeType::BackingTrack => Cow::Borrowed(i18n.tr("node.backing_track")),
+            NodeType::DrumMachine => Cow::Borrowed("Drum Machine"),
+            NodeType::Recorder => Cow::Borrowed("Recorder"),
         }
     }
 

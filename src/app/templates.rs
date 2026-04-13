@@ -244,4 +244,50 @@ impl ToneDockApp {
             }
         }
     }
+
+    pub(crate) fn apply_practice_template(&mut self, name: &str) {
+        let (bpm, metronome_vol, metronome_enabled, template_name_key) = match name {
+            "metal" => (160.0, 0.6, true, "template.metal"),
+            "blues" => (80.0, 0.5, true, "template.blues"),
+            "clean" => (100.0, 0.4, false, "template.clean"),
+            "scale" => (90.0, 0.7, true, "template.scale"),
+            "morning" => (120.0, 0.3, false, "template.morning"),
+            _ => {
+                self.status_message = self.i18n.trf("template.unknown", &[("name", name)]);
+                return;
+            }
+        };
+
+        self.metronome_bpm = bpm;
+        self.metronome_volume = metronome_vol;
+        if metronome_enabled && self.metronome_node_id.is_none() {
+            self.metronome_node_id = Some(self.audio_engine.add_metronome_node());
+        }
+        self.metronome_enabled = metronome_enabled;
+        if let Some(id) = self.metronome_node_id {
+            self.audio_engine.graph_set_state(
+                id,
+                NodeInternalState::Metronome(crate::audio::node::MetronomeNodeState {
+                    bpm,
+                    volume: metronome_vol,
+                    count_in_beats: 4,
+                    count_in_active: true,
+                }),
+            );
+            self.audio_engine.graph_set_enabled(id, metronome_enabled);
+            self.audio_engine.graph_commit_topology();
+        }
+        self.audio_engine.apply_commands_to_staging();
+        self.status_message = self.i18n.tr(template_name_key).into();
+    }
+
+    pub(crate) fn practice_template_names() -> &'static [(&'static str, &'static str)] {
+        &[
+            ("metal", "template.metal"),
+            ("blues", "template.blues"),
+            ("clean", "template.clean"),
+            ("scale", "template.scale"),
+            ("morning", "template.morning"),
+        ]
+    }
 }

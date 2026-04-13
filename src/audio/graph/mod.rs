@@ -75,6 +75,46 @@ impl std::fmt::Display for GraphError {
 
 impl std::error::Error for GraphError {}
 
+pub struct BackingTrackBuffer {
+    pub data: Vec<Vec<f32>>,
+    pub channels: usize,
+    pub sample_rate: f64,
+    pub playback_pos: f64,
+    pub total_frames: usize,
+}
+
+impl BackingTrackBuffer {
+    pub fn new(data: Vec<Vec<f32>>, sample_rate: f64) -> Self {
+        let channels = data.len();
+        let total_frames = data.first().map(|c| c.len()).unwrap_or(0);
+        Self {
+            data,
+            channels,
+            sample_rate,
+            playback_pos: 0.0,
+            total_frames,
+        }
+    }
+
+    pub fn clone_empty(&self) -> Self {
+        Self {
+            data: Vec::new(),
+            channels: self.channels,
+            sample_rate: self.sample_rate,
+            playback_pos: 0.0,
+            total_frames: 0,
+        }
+    }
+
+    pub fn duration_secs(&self) -> f64 {
+        if self.sample_rate > 0.0 {
+            self.total_frames as f64 / self.sample_rate
+        } else {
+            0.0
+        }
+    }
+}
+
 pub(super) struct LooperBuffer {
     pub data: Vec<Vec<f32>>,
     pub channels: usize,
@@ -155,6 +195,30 @@ impl LooperBuffer {
     pub fn clone_empty(&self) -> Self {
         Self::new(self.channels, 48000.0, 120.0)
     }
+
+    #[allow(dead_code)]
+    pub fn export_wav_samples(&self) -> Option<Vec<Vec<f32>>> {
+        if self.len == 0 {
+            return None;
+        }
+        let mut result = vec![vec![0.0f32; self.len]; self.channels];
+        for ch in 0..self.channels {
+            result[ch][..self.len].copy_from_slice(&self.data[ch][..self.len]);
+        }
+        Some(result)
+    }
+
+    #[allow(dead_code)]
+    pub fn import_samples(&mut self, samples: &[Vec<f32>], sample_count: usize) {
+        self.clear();
+        let count = sample_count.min(self.capacity);
+        for ch in 0..self.channels.min(samples.len()) {
+            let copy_len = count.min(samples[ch].len());
+            self.data[ch][..copy_len].copy_from_slice(&samples[ch][..copy_len]);
+        }
+        self.len = count;
+        self.write_pos = count % self.capacity;
+    }
 }
 
 pub struct GraphNode {
@@ -173,14 +237,24 @@ pub struct GraphNode {
     pub plugin_instance: Mutex<Option<LoadedPlugin>>,
     pub internal_state: NodeInternalState,
 
-    pub(super) looper_buffer: Mutex<Option<LooperBuffer>>,
+    pub(super) looper_buffer: Mutex<Option<Vec<LooperBuffer>>>,
+    pub(super) backing_track_buffer: Mutex<Option<BackingTrackBuffer>>,
+    pub(super) recorder_buffer: Mutex<Option<Vec<Vec<f32>>>>,
     pub(super) metronome_phase: Mutex<f64>,
     pub(super) metronome_click_remaining: Mutex<usize>,
+    pub(super) backing_pre_roll_remaining: Mutex<usize>,
+    pub(super) drum_phase: Mutex<f64>,
+    pub(super) drum_step: Mutex<u8>,
 }
 
 impl Clone for GraphNode {
     fn clone(&self) -> Self {
-        let looper_clone = if let Some(ref buf) = *self.looper_buffer.lock() {
+        let looper_clone = if let Some(ref bufs) = *self.looper_buffer.lock() {
+            Some(bufs.iter().map(|b| b.clone_empty()).collect::<Vec<_>>())
+        } else {
+            None
+        };
+        let bt_clone = if let Some(ref buf) = *self.backing_track_buffer.lock() {
             Some(buf.clone_empty())
         } else {
             None
@@ -199,8 +273,13 @@ impl Clone for GraphNode {
             plugin_instance: Mutex::new(None),
             internal_state: self.internal_state.clone(),
             looper_buffer: Mutex::new(looper_clone),
+            backing_track_buffer: Mutex::new(bt_clone),
+            recorder_buffer: Mutex::new(None),
             metronome_phase: Mutex::new(*self.metronome_phase.lock()),
             metronome_click_remaining: Mutex::new(*self.metronome_click_remaining.lock()),
+            backing_pre_roll_remaining: Mutex::new(0),
+            drum_phase: Mutex::new(0.0),
+            drum_step: Mutex::new(0),
         }
     }
 }
@@ -221,6 +300,8 @@ impl GraphNode {
             NodeType::Metronome => NodeInternalState::Metronome(super::node::MetronomeNodeState {
                 bpm: 120.0,
                 volume: 0.5,
+                count_in_beats: 0,
+                count_in_active: false,
             }),
             NodeType::Looper => NodeInternalState::Looper(super::node::LooperNodeState {
                 enabled: false,
@@ -228,18 +309,53 @@ impl GraphNode {
                 playing: false,
                 overdubbing: false,
                 cleared: false,
+                fixed_length_beats: None,
+                quantize_start: false,
+                pre_fader: false,
+                active_track: 0,
             }),
             NodeType::Gain => NodeInternalState::Gain { value: 1.0 },
             NodeType::Pan => NodeInternalState::Pan { value: 0.0 },
             NodeType::WetDry => NodeInternalState::WetDry { mix: 1.0 },
             NodeType::SendBus { .. } => NodeInternalState::SendBus { send_level: 1.0 },
+            NodeType::DrumMachine => {
+                NodeInternalState::DrumMachine(super::node::DrumMachineNodeState {
+                    bpm: 120.0,
+                    volume: 0.8,
+                    playing: false,
+                    pattern: 0,
+                    current_step: 0,
+                })
+            }
+            NodeType::Recorder => NodeInternalState::Recorder(super::node::RecorderNodeState {
+                recording: false,
+                has_data: false,
+            }),
+            NodeType::BackingTrack => {
+                NodeInternalState::BackingTrack(super::node::BackingTrackNodeState {
+                    playing: false,
+                    volume: 1.0,
+                    speed: 1.0,
+                    looping: true,
+                    file_loaded: false,
+                    loop_start: None,
+                    loop_end: None,
+                    pitch_semitones: 0.0,
+                    pre_roll_secs: 0.0,
+                    section_markers: vec![],
+                })
+            }
             _ => NodeInternalState::None,
         };
 
         let looper_buffer = if matches!(node_type, NodeType::Looper) {
             let out_port = output_ports.first();
             let ch = out_port.map(|p| p.channels.channel_count()).unwrap_or(2);
-            Mutex::new(Some(LooperBuffer::new(ch, 48000.0, 120.0)))
+            Mutex::new(Some(
+                (0..4)
+                    .map(|_| LooperBuffer::new(ch, 48000.0, 120.0))
+                    .collect(),
+            ))
         } else {
             Mutex::new(None)
         };
@@ -259,8 +375,13 @@ impl GraphNode {
             plugin_instance: Mutex::new(None),
             internal_state,
             looper_buffer,
+            backing_track_buffer: Mutex::new(None),
+            recorder_buffer: Mutex::new(None),
             metronome_phase: Mutex::new(0.0),
             metronome_click_remaining: Mutex::new(0),
+            backing_pre_roll_remaining: Mutex::new(0),
+            drum_phase: Mutex::new(0.0),
+            drum_step: Mutex::new(0),
         }
     }
 

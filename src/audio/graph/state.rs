@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::audio::node::{Connection, NodeId, NodeInternalState};
 
-use super::{AudioGraph, GraphNode, LooperBuffer};
+use super::{AudioGraph, BackingTrackBuffer, GraphNode, LooperBuffer};
 
 impl AudioGraph {
     pub fn set_node_enabled(&mut self, id: NodeId, enabled: bool) {
@@ -83,9 +83,13 @@ impl AudioGraph {
             Some(n) => n,
             None => return 0,
         };
+        let active_track = match &node.internal_state {
+            NodeInternalState::Looper(s) => s.active_track as usize,
+            _ => 0,
+        };
         let looper = node.looper_buffer.lock();
         match *looper {
-            Some(ref buf) => buf.len,
+            Some(ref bufs) => bufs.get(active_track).map(|b| b.len).unwrap_or(0),
             None => 0,
         }
     }
@@ -93,8 +97,10 @@ impl AudioGraph {
     pub fn clear_looper(&mut self, node_id: NodeId) {
         if let Some(node) = self.nodes.get(&node_id) {
             let mut looper = node.looper_buffer.lock();
-            if let Some(ref mut buf) = *looper {
-                buf.clear();
+            if let Some(ref mut bufs) = *looper {
+                for buf in bufs.iter_mut() {
+                    buf.clear();
+                }
             }
         }
         if let Some(node) = self.nodes.get_mut(&node_id) {
@@ -104,6 +110,10 @@ impl AudioGraph {
                 playing: false,
                 overdubbing: false,
                 cleared: false,
+                fixed_length_beats: None,
+                quantize_start: false,
+                pre_fader: false,
+                active_track: 0,
             });
         }
     }
@@ -120,7 +130,84 @@ impl AudioGraph {
         };
         if let Some(node) = self.nodes.get(&node_id) {
             let mut looper = node.looper_buffer.lock();
-            *looper = Some(LooperBuffer::new(ch, sample_rate, 120.0));
+            *looper = Some(
+                (0..4)
+                    .map(|_| LooperBuffer::new(ch, sample_rate, 120.0))
+                    .collect(),
+            );
+        }
+    }
+
+    pub fn set_backing_track_buffer(&self, node_id: NodeId, buffer: BackingTrackBuffer) {
+        let Some(node) = self.nodes.get(&node_id) else {
+            return;
+        };
+        *node.backing_track_buffer.lock() = Some(buffer);
+    }
+
+    pub fn backing_track_duration_secs(&self, node_id: NodeId) -> f64 {
+        let Some(node) = self.nodes.get(&node_id) else {
+            return 0.0;
+        };
+        let buf = node.backing_track_buffer.lock();
+        match *buf {
+            Some(ref b) => b.duration_secs(),
+            None => 0.0,
+        }
+    }
+
+    pub fn backing_track_position_secs(&self, node_id: NodeId) -> f64 {
+        let Some(node) = self.nodes.get(&node_id) else {
+            return 0.0;
+        };
+        let buf = node.backing_track_buffer.lock();
+        match *buf {
+            Some(ref b) => {
+                if b.sample_rate > 0.0 {
+                    b.playback_pos / b.sample_rate
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        }
+    }
+
+    pub fn backing_track_seek(&self, node_id: NodeId, position_secs: f64) {
+        let Some(node) = self.nodes.get(&node_id) else {
+            return;
+        };
+        let mut buf = node.backing_track_buffer.lock();
+        if let Some(ref mut b) = *buf {
+            let pos = (position_secs * b.sample_rate).clamp(0.0, b.total_frames as f64);
+            b.playback_pos = pos;
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn export_looper_samples(&self, node_id: NodeId) -> Option<Vec<Vec<f32>>> {
+        let node = self.nodes.get(&node_id)?;
+        let active_track = match &node.internal_state {
+            NodeInternalState::Looper(s) => s.active_track as usize,
+            _ => 0,
+        };
+        let looper = node.looper_buffer.lock();
+        match *looper {
+            Some(ref bufs) => bufs.get(active_track).and_then(|b| b.export_wav_samples()),
+            None => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn import_looper_samples(&self, node_id: NodeId, samples: &[Vec<f32>], count: usize) {
+        let Some(node) = self.nodes.get(&node_id) else {
+            return;
+        };
+        let mut looper = node.looper_buffer.lock();
+        if let Some(ref mut bufs) = *looper {
+            if let Some(buf) = bufs.get_mut(0) {
+                buf.import_samples(samples, count);
+            }
         }
     }
 }

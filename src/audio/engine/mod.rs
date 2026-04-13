@@ -1,3 +1,4 @@
+mod backing_track;
 mod device;
 mod graph_commands;
 mod helpers;
@@ -14,7 +15,6 @@ use cpal::{BufferSize, HostId, Stream};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-use crate::audio::chain::Chain;
 use crate::audio::graph::AudioGraph;
 use crate::audio::graph_command::GraphCommand;
 use crate::audio::node::{Connection, NodeId, NodeType, PortId};
@@ -49,12 +49,13 @@ pub struct AudioConfigInfo {
 pub struct AudioEngine {
     pub sample_rate: f64,
     pub buffer_size: u32,
-    pub chain: Arc<Mutex<Chain>>,
     pub graph: Arc<ArcSwap<AudioGraph>>,
     pub master_volume: Arc<Mutex<f32>>,
     pub input_gain: Arc<Mutex<f32>>,
     pub output_level: Arc<Mutex<(f32, f32)>>,
     pub input_level: Arc<Mutex<(f32, f32)>>,
+    pub cpu_usage: Arc<Mutex<f32>>,
+    pub dropout_count: Arc<Mutex<u64>>,
     pub input_channel: usize,
     pub output_channels: (usize, usize),
     #[allow(dead_code)]
@@ -66,6 +67,7 @@ pub struct AudioEngine {
 
     pub metronome_node_id: Option<NodeId>,
     pub looper_node_id: Option<NodeId>,
+    pub backing_track_node_id: Option<NodeId>,
 
     pub(crate) stream: Option<Stream>,
     pub(crate) input_stream: Option<Stream>,
@@ -174,12 +176,13 @@ impl AudioEngine {
         Ok(Self {
             sample_rate,
             buffer_size,
-            chain: Arc::new(Mutex::new(Chain::new())),
             graph: Arc::new(ArcSwap::from_pointee(graph)),
             master_volume: Arc::new(Mutex::new(0.8)),
             input_gain: Arc::new(Mutex::new(1.0)),
             output_level: Arc::new(Mutex::new((0.0, 0.0))),
             input_level: Arc::new(Mutex::new((0.0, 0.0))),
+            cpu_usage: Arc::new(Mutex::new(0.0)),
+            dropout_count: Arc::new(Mutex::new(0)),
             input_channel: 0.min(in_channels.saturating_sub(1)),
             output_channels: (0, if out_channels > 1 { 1 } else { 0 }),
             stream: None,
@@ -197,6 +200,7 @@ impl AudioEngine {
             master_mixer_id,
             metronome_node_id: Some(metronome_id),
             looper_node_id: Some(looper_id),
+            backing_track_node_id: None,
         })
     }
 
@@ -248,6 +252,8 @@ impl AudioEngine {
         let input_gain = self.input_gain.clone();
         let output_level = self.output_level.clone();
         let input_level = self.input_level.clone();
+        let cpu_usage = self.cpu_usage.clone();
+        let dropout_count = self.dropout_count.clone();
         let output_ch = self.output_channels;
 
         let input_buffer = Arc::new(Mutex::new(InputFifo::new(
@@ -304,7 +310,8 @@ impl AudioEngine {
 
         let out_stream = output_device.build_output_stream(
             &out_config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                let callback_start = std::time::Instant::now();
                 let channels = out_ch_count.max(1);
                 let num_frames = data.len() / channels;
 
@@ -380,6 +387,26 @@ impl AudioEngine {
                 {
                     let mut ol = output_level.lock();
                     *ol = (peak_l, peak_r);
+                }
+
+                {
+                    let elapsed = callback_start.elapsed().as_secs_f64();
+                    let buffer_duration = num_frames as f64 / actual_sample_rate as f64;
+                    let usage = (elapsed / buffer_duration * 100.0).min(100.0) as f32;
+                    *cpu_usage.lock() = usage;
+                }
+
+                {
+                    let ts = info.timestamp();
+                    let delta = ts
+                        .playback
+                        .duration_since(&ts.callback)
+                        .unwrap_or(std::time::Duration::ZERO);
+                    let buffer_ns =
+                        (num_frames as f64 / actual_sample_rate as f64) * 1_000_000_000.0;
+                    if delta.as_nanos() as f64 > buffer_ns * 0.95 {
+                        *dropout_count.lock() += 1;
+                    }
                 }
             },
             |err| log::error!("Output stream error: {}", err),

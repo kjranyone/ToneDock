@@ -83,6 +83,9 @@ pub enum NodeType {
     ReturnBus {
         bus_id: u32,
     },
+    BackingTrack,
+    DrumMachine,
+    Recorder,
 }
 
 impl NodeType {
@@ -166,6 +169,14 @@ impl NodeType {
                 direction: PortDirection::Input,
                 channels: ChannelConfig::Stereo,
             }],
+            NodeType::Recorder => vec![Port {
+                id: PortId(0),
+                name: "in".into(),
+                direction: PortDirection::Input,
+                channels: ChannelConfig::Stereo,
+            }],
+            NodeType::DrumMachine => vec![],
+            NodeType::BackingTrack => vec![],
         }
     }
 
@@ -254,6 +265,19 @@ impl NodeType {
                 direction: PortDirection::Output,
                 channels: ChannelConfig::Stereo,
             }],
+            NodeType::Recorder => vec![],
+            NodeType::DrumMachine => vec![Port {
+                id: PortId(0),
+                name: "out".into(),
+                direction: PortDirection::Output,
+                channels: ChannelConfig::Stereo,
+            }],
+            NodeType::BackingTrack => vec![Port {
+                id: PortId(0),
+                name: "out".into(),
+                direction: PortDirection::Output,
+                channels: ChannelConfig::Stereo,
+            }],
         }
     }
 
@@ -279,6 +303,9 @@ pub enum NodeInternalState {
     Pan { value: f32 },
     WetDry { mix: f32 },
     SendBus { send_level: f32 },
+    BackingTrack(BackingTrackNodeState),
+    DrumMachine(DrumMachineNodeState),
+    Recorder(RecorderNodeState),
 }
 
 impl Default for NodeInternalState {
@@ -291,6 +318,10 @@ impl Default for NodeInternalState {
 pub struct MetronomeNodeState {
     pub bpm: f64,
     pub volume: f32,
+    #[serde(default)]
+    pub count_in_beats: u32,
+    #[serde(default)]
+    pub count_in_active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -300,6 +331,49 @@ pub struct LooperNodeState {
     pub playing: bool,
     pub overdubbing: bool,
     pub cleared: bool,
+    #[serde(default)]
+    pub fixed_length_beats: Option<u32>,
+    #[serde(default)]
+    pub quantize_start: bool,
+    #[serde(default)]
+    pub pre_fader: bool,
+    #[serde(default)]
+    pub active_track: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackingTrackNodeState {
+    pub playing: bool,
+    pub volume: f32,
+    pub speed: f32,
+    pub pitch_semitones: f32,
+    pub looping: bool,
+    pub file_loaded: bool,
+    #[serde(default)]
+    pub loop_start: Option<f64>,
+    #[serde(default)]
+    pub loop_end: Option<f64>,
+    #[serde(default)]
+    pub pre_roll_secs: f64,
+    #[serde(default)]
+    pub section_markers: Vec<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrumMachineNodeState {
+    pub bpm: f64,
+    pub volume: f32,
+    pub playing: bool,
+    #[serde(default)]
+    pub pattern: u8,
+    #[serde(default)]
+    pub current_step: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecorderNodeState {
+    pub recording: bool,
+    pub has_data: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

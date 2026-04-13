@@ -1,13 +1,15 @@
 use egui::*;
 
 use super::ToneDockApp;
-use crate::audio::node::{LooperNodeState, MetronomeNodeState, NodeInternalState};
+use crate::audio::node::{
+    BackingTrackNodeState, LooperNodeState, MetronomeNodeState, NodeInternalState,
+};
 
 use super::toolbar::ui_section_frame;
 
 pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
     TopBottomPanel::bottom("transport")
-        .exact_height(56.0)
+        .exact_height(74.0)
         .frame(egui::Frame {
             fill: Color32::TRANSPARENT,
             inner_margin: Margin::symmetric(10, 6),
@@ -63,6 +65,8 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                     NodeInternalState::Metronome(MetronomeNodeState {
                                         bpm: app.metronome_bpm,
                                         volume: app.metronome_volume,
+                                        count_in_beats: 0,
+                                        count_in_active: false,
                                     }),
                                 );
                                 app.audio_engine
@@ -87,6 +91,8 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                     NodeInternalState::Metronome(MetronomeNodeState {
                                         bpm,
                                         volume: app.metronome_volume,
+                                        count_in_beats: 0,
+                                        count_in_active: false,
                                     }),
                                 );
                             }
@@ -103,8 +109,36 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                     NodeInternalState::Metronome(MetronomeNodeState {
                                         bpm: app.metronome_bpm,
                                         volume: vol,
+                                        count_in_beats: 0,
+                                        count_in_active: false,
                                     }),
                                 );
+                            }
+                        }
+
+                        ui.label(app.i18n.tr("transport.count_in"));
+                        let mut count_in = false;
+                        if let Some(id) = app.metronome_node_id {
+                            let guard = app.audio_engine.graph.load();
+                            if let Some(node) = guard.get_node(id) {
+                                if let NodeInternalState::Metronome(ms) = &node.internal_state {
+                                    count_in = ms.count_in_active;
+                                }
+                            }
+                        }
+                        if crate::ui::controls::draw_toggle(ui, "", count_in, 14.0) {
+                            if let Some(id) = app.metronome_node_id {
+                                let new_active = !count_in;
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::Metronome(MetronomeNodeState {
+                                        bpm: app.metronome_bpm,
+                                        volume: app.metronome_volume,
+                                        count_in_beats: 4,
+                                        count_in_active: new_active,
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
                             }
                         }
                     });
@@ -132,6 +166,10 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                         playing: false,
                                         overdubbing: false,
                                         cleared: false,
+                                        fixed_length_beats: None,
+                                        quantize_start: false,
+                                        pre_fader: app.looper_pre_fader,
+                                        active_track: app.looper_active_track,
                                     }),
                                 );
                                 app.audio_engine.graph_set_enabled(id, app.looper_enabled);
@@ -150,6 +188,10 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                             playing: false,
                                             overdubbing: false,
                                             cleared: true,
+                                            fixed_length_beats: None,
+                                            quantize_start: false,
+                                            pre_fader: app.looper_pre_fader,
+                                            active_track: app.looper_active_track,
                                         }),
                                     );
                                 }
@@ -183,6 +225,10 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                         playing: app.looper_playing,
                                         overdubbing: false,
                                         cleared: false,
+                                        fixed_length_beats: None,
+                                        quantize_start: false,
+                                        pre_fader: app.looper_pre_fader,
+                                        active_track: app.looper_active_track,
                                     }),
                                 );
                                 app.audio_engine.graph_set_enabled(id, true);
@@ -216,6 +262,10 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                         playing: app.looper_playing,
                                         overdubbing: app.looper_overdubbing,
                                         cleared: false,
+                                        fixed_length_beats: None,
+                                        quantize_start: false,
+                                        pre_fader: app.looper_pre_fader,
+                                        active_track: app.looper_active_track,
                                     }),
                                 );
                                 app.audio_engine.graph_set_enabled(id, true);
@@ -251,6 +301,10 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                         playing: app.looper_playing,
                                         overdubbing: app.looper_overdubbing,
                                         cleared: false,
+                                        fixed_length_beats: None,
+                                        quantize_start: false,
+                                        pre_fader: app.looper_pre_fader,
+                                        active_track: app.looper_active_track,
                                     }),
                                 );
                             }
@@ -272,8 +326,679 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                                         playing: false,
                                         overdubbing: false,
                                         cleared: true,
+                                        fixed_length_beats: None,
+                                        quantize_start: false,
+                                        pre_fader: app.looper_pre_fader,
+                                        active_track: app.looper_active_track,
                                     }),
                                 );
+                            }
+                        }
+
+                        ui.separator();
+
+                        let (cur_fixed, cur_quant) = if let Some(id) = app.looper_node_id {
+                            let guard = app.audio_engine.graph.load();
+                            if let Some(node) = guard.get_node(id) {
+                                if let NodeInternalState::Looper(st) = &node.internal_state {
+                                    (st.fixed_length_beats, st.quantize_start)
+                                } else {
+                                    (None, false)
+                                }
+                            } else {
+                                (None, false)
+                            }
+                        } else {
+                            (None, false)
+                        };
+
+                        ui.label(
+                            RichText::new(app.i18n.tr("transport.fixed_len"))
+                                .size(9.0)
+                                .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+                        let mut beats_str = cur_fixed.map(|b| b.to_string()).unwrap_or_default();
+                        if ui
+                            .add_sized(
+                                [36.0, 20.0],
+                                egui::TextEdit::singleline(&mut beats_str)
+                                    .hint_text("--")
+                                    .font(egui::TextStyle::Monospace),
+                            )
+                            .changed()
+                        {
+                            let new_fixed = if beats_str.is_empty() {
+                                None
+                            } else {
+                                beats_str.parse::<u32>().ok()
+                            };
+                            if let Some(id) = app.looper_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::Looper(LooperNodeState {
+                                        enabled: app.looper_enabled,
+                                        recording: app.looper_recording,
+                                        playing: app.looper_playing,
+                                        overdubbing: app.looper_overdubbing,
+                                        cleared: false,
+                                        fixed_length_beats: new_fixed,
+                                        quantize_start: cur_quant,
+                                        pre_fader: app.looper_pre_fader,
+                                        active_track: app.looper_active_track,
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        ui.label(
+                            RichText::new(app.i18n.tr("transport.quant"))
+                                .size(9.0)
+                                .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+                        if crate::ui::controls::draw_toggle(ui, "", cur_quant, 12.0) {
+                            if let Some(id) = app.looper_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::Looper(LooperNodeState {
+                                        enabled: app.looper_enabled,
+                                        recording: app.looper_recording,
+                                        playing: app.looper_playing,
+                                        overdubbing: app.looper_overdubbing,
+                                        cleared: false,
+                                        fixed_length_beats: cur_fixed,
+                                        quantize_start: !cur_quant,
+                                        pre_fader: app.looper_pre_fader,
+                                        active_track: app.looper_active_track,
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        ui.label(
+                            RichText::new(app.i18n.tr("transport.pre_fader"))
+                                .size(9.0)
+                                .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+                        if crate::ui::controls::draw_toggle(ui, "", app.looper_pre_fader, 12.0) {
+                            app.looper_pre_fader = !app.looper_pre_fader;
+                            if let Some(id) = app.looper_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::Looper(LooperNodeState {
+                                        enabled: app.looper_enabled,
+                                        recording: app.looper_recording,
+                                        playing: app.looper_playing,
+                                        overdubbing: app.looper_overdubbing,
+                                        cleared: false,
+                                        fixed_length_beats: cur_fixed,
+                                        quantize_start: cur_quant,
+                                        pre_fader: app.looper_pre_fader,
+                                        active_track: app.looper_active_track,
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        ui.label(
+                            RichText::new("Trk")
+                                .size(9.0)
+                                .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+                        let mut track = app.looper_active_track;
+                        ui.add_sized(
+                            [28.0, 18.0],
+                            egui::DragValue::new(&mut track).speed(0.1).range(0..=3),
+                        );
+                        if track != app.looper_active_track {
+                            app.looper_active_track = track;
+                            if let Some(id) = app.looper_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::Looper(LooperNodeState {
+                                        enabled: app.looper_enabled,
+                                        recording: app.looper_recording,
+                                        playing: app.looper_playing,
+                                        overdubbing: app.looper_overdubbing,
+                                        cleared: false,
+                                        fixed_length_beats: cur_fixed,
+                                        quantize_start: cur_quant,
+                                        pre_fader: app.looper_pre_fader,
+                                        active_track: app.looper_active_track,
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+                    });
+                });
+
+                ui_section_frame().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(app.i18n.tr("transport.backing_track"))
+                                .size(9.0)
+                                .color(crate::ui::theme::ACCENT),
+                        );
+
+                        if ui
+                            .add_sized(
+                                [60.0, 22.0],
+                                Button::new(app.i18n.tr("transport.open_file")),
+                            )
+                            .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter(
+                                    app.i18n.tr("transport.audio_files").to_owned(),
+                                    &["wav", "mp3", "flac", "ogg", "aac", "m4a"],
+                                )
+                                .pick_file()
+                            {
+                                let id = app.audio_engine.ensure_backing_track_in_graph();
+                                app.backing_track_node_id = Some(id);
+                                match app.audio_engine.load_backing_track_file(id, &path) {
+                                    Ok(()) => {
+                                        app.backing_track_file_name = path
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().into_owned());
+                                        app.backing_track_duration =
+                                            app.audio_engine.backing_track_duration(id);
+                                        app.status_message = app.i18n.trf(
+                                            "status.loaded_backing_track",
+                                            &[(
+                                                "name",
+                                                &app.backing_track_file_name
+                                                    .as_deref()
+                                                    .unwrap_or("?"),
+                                            )],
+                                        );
+                                    }
+                                    Err(e) => {
+                                        app.status_message = app.i18n.trf(
+                                            "status.backing_track_error",
+                                            &[("error", &e.to_string())],
+                                        );
+                                        log::error!("Failed to load backing track: {}", e);
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(name) = &app.backing_track_file_name {
+                            let display_name = if name.len() > 18 {
+                                format!("{}...", &name[..15])
+                            } else {
+                                name.clone()
+                            };
+                            ui.label(
+                                RichText::new(display_name)
+                                    .size(10.0)
+                                    .color(crate::ui::theme::TEXT_SECONDARY),
+                            );
+                        }
+
+                        let play_fill = if app.backing_track_playing {
+                            Color32::from_rgb(56, 80, 62)
+                        } else {
+                            crate::ui::theme::SURFACE_CONTAINER_HIGH
+                        };
+                        if ui
+                            .add_sized(
+                                [42.0, 24.0],
+                                Button::new(app.i18n.tr("transport.play")).fill(play_fill),
+                            )
+                            .clicked()
+                        {
+                            if let Some(id) = app.backing_track_node_id {
+                                app.backing_track_playing = !app.backing_track_playing;
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::BackingTrack(BackingTrackNodeState {
+                                        playing: app.backing_track_playing,
+                                        volume: app.backing_track_volume,
+                                        speed: app.backing_track_speed,
+                                        looping: app.backing_track_looping,
+                                        file_loaded: true,
+                                        loop_start: None,
+                                        loop_end: None,
+                                        pitch_semitones: app.backing_track_pitch_semitones,
+                                        pre_roll_secs: app.backing_track_pre_roll_secs,
+                                        section_markers: vec![],
+                                    }),
+                                );
+                                app.audio_engine.graph_set_enabled(id, true);
+                                app.audio_engine.graph_commit_topology();
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        if ui
+                            .add_sized([42.0, 24.0], Button::new(app.i18n.tr("transport.stop")))
+                            .clicked()
+                        {
+                            if let Some(id) = app.backing_track_node_id {
+                                app.backing_track_playing = false;
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::BackingTrack(BackingTrackNodeState {
+                                        playing: false,
+                                        volume: app.backing_track_volume,
+                                        speed: app.backing_track_speed,
+                                        looping: app.backing_track_looping,
+                                        file_loaded: true,
+                                        loop_start: None,
+                                        loop_end: None,
+                                        pitch_semitones: app.backing_track_pitch_semitones,
+                                        pre_roll_secs: app.backing_track_pre_roll_secs,
+                                        section_markers: vec![],
+                                    }),
+                                );
+                                app.audio_engine.backing_track_seek(id, 0.0);
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        ui.label(app.i18n.tr("transport.vol"));
+                        let mut vol = app.backing_track_volume;
+                        ui.add_sized([50.0, 18.0], egui::Slider::new(&mut vol, 0.0..=1.0));
+                        if (vol - app.backing_track_volume).abs() > 0.001 {
+                            app.backing_track_volume = vol;
+                            if let Some(id) = app.backing_track_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::BackingTrack(BackingTrackNodeState {
+                                        playing: app.backing_track_playing,
+                                        volume: vol,
+                                        speed: app.backing_track_speed,
+                                        looping: app.backing_track_looping,
+                                        file_loaded: true,
+                                        loop_start: None,
+                                        loop_end: None,
+                                        pitch_semitones: app.backing_track_pitch_semitones,
+                                        pre_roll_secs: app.backing_track_pre_roll_secs,
+                                        section_markers: vec![],
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        ui.label(app.i18n.tr("transport.speed"));
+                        let mut speed = app.backing_track_speed;
+                        ui.add_sized(
+                            [46.0, 18.0],
+                            egui::DragValue::new(&mut speed)
+                                .speed(0.05)
+                                .range(0.25..=2.0),
+                        );
+                        if (speed - app.backing_track_speed).abs() > 0.001 {
+                            app.backing_track_speed = speed;
+                            if let Some(id) = app.backing_track_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::BackingTrack(BackingTrackNodeState {
+                                        playing: app.backing_track_playing,
+                                        volume: app.backing_track_volume,
+                                        speed,
+                                        looping: app.backing_track_looping,
+                                        file_loaded: true,
+                                        loop_start: None,
+                                        loop_end: None,
+                                        pitch_semitones: app.backing_track_pitch_semitones,
+                                        pre_roll_secs: app.backing_track_pre_roll_secs,
+                                        section_markers: vec![],
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        if crate::ui::controls::draw_toggle(ui, "", app.backing_track_looping, 14.0)
+                        {
+                            app.backing_track_looping = !app.backing_track_looping;
+                            if let Some(id) = app.backing_track_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::BackingTrack(BackingTrackNodeState {
+                                        playing: app.backing_track_playing,
+                                        volume: app.backing_track_volume,
+                                        speed: app.backing_track_speed,
+                                        looping: app.backing_track_looping,
+                                        file_loaded: true,
+                                        loop_start: None,
+                                        loop_end: None,
+                                        pitch_semitones: app.backing_track_pitch_semitones,
+                                        pre_roll_secs: app.backing_track_pre_roll_secs,
+                                        section_markers: vec![],
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+                        ui.label(
+                            RichText::new(app.i18n.tr("transport.loop"))
+                                .size(9.0)
+                                .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+
+                        ui.separator();
+
+                        ui.label(
+                            RichText::new(app.i18n.tr("transport.pitch"))
+                                .size(9.0)
+                                .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+                        let mut pitch = app.backing_track_pitch_semitones;
+                        ui.add_sized(
+                            [42.0, 18.0],
+                            egui::DragValue::new(&mut pitch)
+                                .speed(0.5)
+                                .range(-12.0..=12.0)
+                                .suffix("st"),
+                        );
+                        if (pitch - app.backing_track_pitch_semitones).abs() > 0.01 {
+                            app.backing_track_pitch_semitones = pitch;
+                            if let Some(id) = app.backing_track_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::BackingTrack(BackingTrackNodeState {
+                                        playing: app.backing_track_playing,
+                                        volume: app.backing_track_volume,
+                                        speed: app.backing_track_speed,
+                                        looping: app.backing_track_looping,
+                                        file_loaded: true,
+                                        loop_start: None,
+                                        loop_end: None,
+                                        pitch_semitones: app.backing_track_pitch_semitones,
+                                        pre_roll_secs: app.backing_track_pre_roll_secs,
+                                        section_markers: vec![],
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        ui.label(
+                            RichText::new(app.i18n.tr("transport.pre_roll"))
+                                .size(9.0)
+                                .color(crate::ui::theme::TEXT_SECONDARY),
+                        );
+                        let mut pre_roll = app.backing_track_pre_roll_secs;
+                        ui.add_sized(
+                            [42.0, 18.0],
+                            egui::DragValue::new(&mut pre_roll)
+                                .speed(0.5)
+                                .range(0.0..=10.0)
+                                .suffix("s"),
+                        );
+                        if (pre_roll - app.backing_track_pre_roll_secs).abs() > 0.01 {
+                            app.backing_track_pre_roll_secs = pre_roll;
+                            if let Some(id) = app.backing_track_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::BackingTrack(BackingTrackNodeState {
+                                        playing: app.backing_track_playing,
+                                        volume: app.backing_track_volume,
+                                        speed: app.backing_track_speed,
+                                        looping: app.backing_track_looping,
+                                        file_loaded: true,
+                                        loop_start: None,
+                                        loop_end: None,
+                                        pitch_semitones: app.backing_track_pitch_semitones,
+                                        pre_roll_secs: app.backing_track_pre_roll_secs,
+                                        section_markers: vec![],
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        if let Some(id) = app.backing_track_node_id {
+                            let pos = app.audio_engine.backing_track_position(id);
+                            let dur = app.backing_track_duration;
+                            let pos_text = if dur > 0.0 {
+                                let pos_mins = (pos / 60.0) as u32;
+                                let pos_secs = (pos % 60.0) as u32;
+                                let pos_cs = ((pos % 60.0 - pos_secs as f64) * 100.0) as u32;
+                                let dur_mins = (dur / 60.0) as u32;
+                                let dur_secs = (dur % 60.0) as u32;
+                                let dur_cs = ((dur % 60.0 - dur_secs as f64) * 100.0) as u32;
+                                format!(
+                                    "{}:{:02}.{:02}/{}:{:02}.{:02}",
+                                    pos_mins, pos_secs, pos_cs, dur_mins, dur_secs, dur_cs
+                                )
+                            } else {
+                                "--:--".into()
+                            };
+                            ui.label(
+                                RichText::new(pos_text)
+                                    .size(9.0)
+                                    .color(crate::ui::theme::TEXT_SECONDARY),
+                            );
+
+                            let (cur_ab_start, cur_ab_end) = {
+                                let guard = app.audio_engine.graph.load();
+                                if let Some(node) = guard.get_node(id) {
+                                    if let NodeInternalState::BackingTrack(st) =
+                                        &node.internal_state
+                                    {
+                                        (st.loop_start, st.loop_end)
+                                    } else {
+                                        (None, None)
+                                    }
+                                } else {
+                                    (None, None)
+                                }
+                            };
+
+                            let ab_label = if cur_ab_start.is_some() && cur_ab_end.is_some() {
+                                app.i18n.tr("transport.ab_clear")
+                            } else if cur_ab_start.is_some() {
+                                app.i18n.tr("transport.ab_set_b")
+                            } else {
+                                app.i18n.tr("transport.ab_set_a")
+                            };
+                            if ui
+                                .add_sized(
+                                    [52.0, 20.0],
+                                    Button::new(RichText::new(ab_label).size(9.0)),
+                                )
+                                .clicked()
+                            {
+                                let (new_start, new_end) =
+                                    if cur_ab_start.is_some() && cur_ab_end.is_some() {
+                                        (None, None)
+                                    } else if cur_ab_start.is_some() {
+                                        (cur_ab_start, Some(pos))
+                                    } else {
+                                        (Some(pos), None)
+                                    };
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::BackingTrack(BackingTrackNodeState {
+                                        playing: app.backing_track_playing,
+                                        volume: app.backing_track_volume,
+                                        speed: app.backing_track_speed,
+                                        looping: app.backing_track_looping,
+                                        file_loaded: true,
+                                        loop_start: new_start,
+                                        loop_end: new_end,
+                                        pitch_semitones: app.backing_track_pitch_semitones,
+                                        pre_roll_secs: app.backing_track_pre_roll_secs,
+                                        section_markers: vec![],
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+
+                            let cur_markers = {
+                                let guard = app.audio_engine.graph.load();
+                                if let Some(node) = guard.get_node(id) {
+                                    if let NodeInternalState::BackingTrack(st) =
+                                        &node.internal_state
+                                    {
+                                        st.section_markers.clone()
+                                    } else {
+                                        vec![]
+                                    }
+                                } else {
+                                    vec![]
+                                }
+                            };
+
+                            if ui.button(app.i18n.tr("transport.add_marker")).clicked() {
+                                let mut markers = cur_markers.clone();
+                                markers.push(pos);
+                                markers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::BackingTrack(BackingTrackNodeState {
+                                        playing: app.backing_track_playing,
+                                        volume: app.backing_track_volume,
+                                        speed: app.backing_track_speed,
+                                        looping: app.backing_track_looping,
+                                        file_loaded: true,
+                                        loop_start: cur_ab_start,
+                                        loop_end: cur_ab_end,
+                                        pitch_semitones: app.backing_track_pitch_semitones,
+                                        pre_roll_secs: app.backing_track_pre_roll_secs,
+                                        section_markers: markers,
+                                    }),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+
+                            for marker in cur_markers.iter() {
+                                let mins = (*marker / 60.0) as u32;
+                                let secs = (*marker % 60.0) as u32;
+                                let label = format!("{}:{:02}", mins, secs);
+                                if ui.button(RichText::new(label).size(8.0)).clicked() {
+                                    app.audio_engine.backing_track_seek(id, *marker);
+                                }
+                            }
+                        }
+                    });
+                });
+
+                ui_section_frame().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(app.i18n.tr("transport.drum_machine"))
+                                .size(9.0)
+                                .color(crate::ui::theme::ACCENT),
+                        );
+
+                        let (drum_playing, drum_bpm, drum_vol, drum_pattern) =
+                            if let Some(id) = app.drum_machine_node_id {
+                                let guard = app.audio_engine.graph.load();
+                                if let Some(node) = guard.get_node(id) {
+                                    if let crate::audio::node::NodeInternalState::DrumMachine(st) =
+                                        &node.internal_state
+                                    {
+                                        (st.playing, st.bpm, st.volume, st.pattern)
+                                    } else {
+                                        (false, 120.0, 0.8, 0)
+                                    }
+                                } else {
+                                    (false, 120.0, 0.8, 0)
+                                }
+                            } else {
+                                (false, 120.0, 0.8, 0)
+                            };
+
+                        if crate::ui::controls::draw_toggle(ui, "", drum_playing, 14.0) {
+                            if app.drum_machine_node_id.is_none() {
+                                app.drum_machine_node_id =
+                                    Some(app.audio_engine.add_drum_machine_node());
+                            }
+                            if let Some(id) = app.drum_machine_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::DrumMachine(
+                                        crate::audio::node::DrumMachineNodeState {
+                                            bpm: drum_bpm,
+                                            volume: drum_vol,
+                                            playing: !drum_playing,
+                                            pattern: drum_pattern,
+                                            current_step: 0,
+                                        },
+                                    ),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        ui.label(app.i18n.tr("transport.drum_bpm"));
+                        let mut bpm = drum_bpm;
+                        ui.add_sized(
+                            [46.0, 18.0],
+                            egui::DragValue::new(&mut bpm)
+                                .speed(1.0)
+                                .range(40.0..=300.0),
+                        );
+                        if (bpm - drum_bpm).abs() > 0.01 {
+                            if let Some(id) = app.drum_machine_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::DrumMachine(
+                                        crate::audio::node::DrumMachineNodeState {
+                                            bpm,
+                                            volume: drum_vol,
+                                            playing: drum_playing,
+                                            pattern: drum_pattern,
+                                            current_step: 0,
+                                        },
+                                    ),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        ui.label(app.i18n.tr("transport.drum_vol"));
+                        let mut vol = drum_vol;
+                        ui.add_sized([46.0, 16.0], egui::Slider::new(&mut vol, 0.0..=1.0));
+                        if (vol - drum_vol).abs() > 0.001 {
+                            if let Some(id) = app.drum_machine_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::DrumMachine(
+                                        crate::audio::node::DrumMachineNodeState {
+                                            bpm: drum_bpm,
+                                            volume: vol,
+                                            playing: drum_playing,
+                                            pattern: drum_pattern,
+                                            current_step: 0,
+                                        },
+                                    ),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
+                            }
+                        }
+
+                        ui.label(app.i18n.tr("transport.drum_pattern"));
+                        let mut pat = drum_pattern;
+                        ui.add_sized(
+                            [36.0, 18.0],
+                            egui::DragValue::new(&mut pat).speed(0.1).range(0..=4),
+                        );
+                        if pat != drum_pattern {
+                            if let Some(id) = app.drum_machine_node_id {
+                                app.audio_engine.graph_set_state(
+                                    id,
+                                    NodeInternalState::DrumMachine(
+                                        crate::audio::node::DrumMachineNodeState {
+                                            bpm: drum_bpm,
+                                            volume: drum_vol,
+                                            playing: drum_playing,
+                                            pattern: pat,
+                                            current_step: 0,
+                                        },
+                                    ),
+                                );
+                                app.audio_engine.apply_commands_to_staging();
                             }
                         }
                     });

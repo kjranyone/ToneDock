@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::audio::engine::AudioEngine;
 use crate::audio::node::NodeId;
 use crate::i18n::{I18n, Language};
+use crate::midi::{MidiAction, MidiInput, MidiMap};
 use crate::ui::node_editor::NodeEditor;
 use crate::ui::rack_view::RackView;
 use crate::undo::UndoManager;
@@ -11,6 +12,7 @@ use crate::vst_host::scanner::PluginInfo;
 
 mod commands;
 mod dialogs;
+mod midi_handler;
 mod rack;
 mod rack_view;
 mod session;
@@ -53,6 +55,17 @@ struct AppSettings {
     pub custom_plugin_paths: Vec<std::path::PathBuf>,
     pub inline_rack_plugin_gui: bool,
     pub language: Language,
+    pub last_session_path: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub midi_device_name: Option<String>,
+    #[serde(default)]
+    pub midi_map: MidiMap,
+    #[serde(default)]
+    pub disabled_plugin_paths: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    pub bpm_goal: Option<f64>,
+    #[serde(default)]
+    pub total_practice_secs: u64,
 }
 
 impl Default for AppSettings {
@@ -70,11 +83,21 @@ impl Default for AppSettings {
             custom_plugin_paths: Vec::new(),
             inline_rack_plugin_gui: false,
             language: Language::default(),
+            last_session_path: None,
+            midi_device_name: None,
+            midi_map: MidiMap::new(),
+            disabled_plugin_paths: Vec::new(),
+            bpm_goal: None,
+            total_practice_secs: 0,
         }
     }
 }
 
 const SETTINGS_KEY: &str = "tonedock_settings";
+
+pub(crate) fn autosave_path() -> Option<std::path::PathBuf> {
+    dirs::data_dir().map(|d| d.join("ToneDock").join("autosave.tonedock-preset.json"))
+}
 
 pub(super) enum ViewMode {
     Rack,
@@ -101,7 +124,25 @@ pub struct ToneDockApp {
     looper_recording: bool,
     looper_playing: bool,
     looper_overdubbing: bool,
+    looper_pre_fader: bool,
+    looper_active_track: u8,
     looper_node_id: Option<NodeId>,
+
+    backing_track_node_id: Option<NodeId>,
+    backing_track_playing: bool,
+    backing_track_volume: f32,
+    backing_track_speed: f32,
+    backing_track_pitch_semitones: f32,
+    backing_track_pre_roll_secs: f64,
+    backing_track_looping: bool,
+    backing_track_file_name: Option<String>,
+    backing_track_duration: f64,
+
+    recorder_node_id: Option<NodeId>,
+    drum_machine_node_id: Option<NodeId>,
+
+    preset_a: Option<String>,
+    preset_b: Option<String>,
 
     selected_rack_node: Option<NodeId>,
     rack_order: Vec<NodeId>,
@@ -119,6 +160,25 @@ pub struct ToneDockApp {
     main_hwnd: Option<std::ptr::NonNull<std::ffi::c_void>>,
     settings: AppSettings,
     settings_dirty: bool,
+
+    midi_input: MidiInput,
+    midi_map: MidiMap,
+    midi_learning: bool,
+    midi_learn_target: Option<MidiAction>,
+    tap_tempo_times: Vec<std::time::Instant>,
+
+    fullscreen: bool,
+    practice_timer_start: Option<std::time::Instant>,
+    last_dropout_count: u64,
+    disabled_plugin_paths: Vec<std::path::PathBuf>,
+
+    scan_rx: Option<crossbeam_channel::Receiver<ScanResult>>,
+    scanning_in_progress: bool,
+}
+
+enum ScanResult {
+    Full(Vec<PluginInfo>),
+    Delta(Vec<PluginInfo>),
 }
 
 impl ToneDockApp {
@@ -140,6 +200,10 @@ impl ToneDockApp {
         let preset_name: String = i18n.tr("file.untitled").into();
         let initial_status: String = i18n.tr("status.ready").into();
 
+        let midi_map = settings.midi_map.clone();
+        let midi_device_name = settings.midi_device_name.clone();
+        let disabled_plugin_paths = settings.disabled_plugin_paths.clone();
+
         let mut app = Self {
             i18n,
             audio_engine,
@@ -158,7 +222,22 @@ impl ToneDockApp {
             looper_recording: false,
             looper_playing: false,
             looper_overdubbing: false,
+            looper_pre_fader: false,
+            looper_active_track: 0,
             looper_node_id: None,
+            backing_track_node_id: None,
+            backing_track_playing: false,
+            backing_track_volume: 0.8,
+            backing_track_speed: 1.0,
+            backing_track_pitch_semitones: 0.0,
+            backing_track_pre_roll_secs: 0.0,
+            backing_track_looping: true,
+            backing_track_file_name: None,
+            backing_track_duration: 0.0,
+            recorder_node_id: None,
+            drum_machine_node_id: None,
+            preset_a: None,
+            preset_b: None,
             selected_rack_node: None,
             rack_order: Vec::new(),
             rack_plugin_editors: HashMap::new(),
@@ -173,6 +252,17 @@ impl ToneDockApp {
             main_hwnd: None,
             settings,
             settings_dirty: false,
+            midi_input: MidiInput::new(),
+            midi_map,
+            midi_learning: false,
+            midi_learn_target: None,
+            tap_tempo_times: Vec::new(),
+            fullscreen: false,
+            practice_timer_start: None,
+            last_dropout_count: 0,
+            disabled_plugin_paths,
+            scan_rx: None,
+            scanning_in_progress: false,
         };
 
         *app.audio_engine.master_volume.lock() = app.master_volume;
@@ -181,8 +271,21 @@ impl ToneDockApp {
         app.scan_plugins();
         app.restore_audio_config();
         app.start_audio();
+        app.restore_midi_device(&midi_device_name);
+        app.auto_restore();
 
         app
+    }
+
+    fn restore_midi_device(&mut self, device_name: &Option<String>) {
+        if let Some(name) = device_name {
+            let devices = crate::midi::MidiInput::enumerate_devices();
+            if let Some(device) = devices.iter().find(|d| d.name == *name) {
+                if let Err(e) = self.midi_input.open_device(device.port_index) {
+                    log::warn!("Failed to restore MIDI device '{}': {}", name, e);
+                }
+            }
+        }
     }
 
     fn restore_audio_config(&mut self) {
@@ -223,66 +326,82 @@ impl ToneDockApp {
         self.settings.custom_plugin_paths = self.custom_plugin_paths.clone();
         self.settings.inline_rack_plugin_gui = self.inline_rack_plugin_gui;
         self.settings.language = self.i18n.language();
+        self.settings.midi_map = self.midi_map.clone();
+        self.settings.disabled_plugin_paths = self.disabled_plugin_paths.clone();
         self.settings_dirty = true;
     }
 
     pub(crate) fn scan_plugins(&mut self) {
-        let chain = self.audio_engine.chain.lock();
-        match chain.scan_plugins() {
-            Ok(plugins) => {
-                self.available_plugins = plugins;
-                self.status_message = self.i18n.trf(
-                    "status.found_plugins",
-                    &[("count", &self.available_plugins.len().to_string())],
-                );
-                log::info!("Scanned {} plugins", self.available_plugins.len());
+        if self.scanning_in_progress {
+            return;
+        }
+        self.scanning_in_progress = true;
+        self.status_message = self.i18n.tr("status.scanning").into();
+
+        let custom_paths = self.custom_plugin_paths.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.scan_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let mut scanner = crate::vst_host::scanner::PluginScanner::new();
+            for path in &custom_paths {
+                scanner.add_path(path.clone());
             }
-            Err(e) => {
-                self.status_message = self
-                    .i18n
-                    .trf("status.scan_error", &[("error", &e.to_string())]);
-                log::error!("Plugin scan failed: {}", e);
+            let plugins = scanner.scan();
+            let _ = tx.send(ScanResult::Full(plugins));
+        });
+    }
+
+    pub(crate) fn poll_scan_results(&mut self) {
+        if let Some(ref rx) = self.scan_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.scanning_in_progress = false;
+                self.scan_rx = None;
+                let disabled = self.disabled_plugin_paths.clone();
+                match result {
+                    ScanResult::Full(plugins) => {
+                        self.available_plugins = plugins
+                            .into_iter()
+                            .filter(|p| !disabled.iter().any(|d| p.path.starts_with(d)))
+                            .collect();
+                        self.status_message = self.i18n.trf(
+                            "status.found_plugins",
+                            &[("count", &self.available_plugins.len().to_string())],
+                        );
+                        log::info!(
+                            "Background scan found {} plugins",
+                            self.available_plugins.len()
+                        );
+                    }
+                    ScanResult::Delta(new_plugins) => {
+                        if new_plugins.is_empty() {
+                            self.status_message = self.i18n.tr("status.no_new_plugins").into();
+                            return;
+                        }
+                        let count = new_plugins.len();
+                        let mut seen: std::collections::HashSet<std::path::PathBuf> = self
+                            .available_plugins
+                            .iter()
+                            .map(|p| p.path.clone())
+                            .collect();
+                        for p in new_plugins {
+                            if !disabled.iter().any(|d| p.path.starts_with(d))
+                                && seen.insert(p.path.clone())
+                            {
+                                self.available_plugins.push(p);
+                            }
+                        }
+                        self.status_message = self
+                            .i18n
+                            .trf("status.delta_scan", &[("count", &count.to_string())]);
+                    }
+                }
             }
         }
     }
 
     pub(crate) fn scan_plugins_with_custom_paths(&mut self) {
-        let mut scanner = crate::vst_host::scanner::PluginScanner::new();
-        for path in &self.custom_plugin_paths {
-            scanner.add_path(path.clone());
-        }
-        let custom_plugins = scanner.scan();
-
-        let chain = self.audio_engine.chain.lock();
-        match chain.scan_plugins() {
-            Ok(plugins) => {
-                self.available_plugins = plugins;
-                let mut seen: std::collections::HashSet<std::path::PathBuf> = self
-                    .available_plugins
-                    .iter()
-                    .map(|p| p.path.clone())
-                    .collect();
-                for p in custom_plugins {
-                    if seen.insert(p.path.clone()) {
-                        self.available_plugins.push(p);
-                    }
-                }
-                self.status_message = self.i18n.trf(
-                    "status.found_plugins",
-                    &[("count", &self.available_plugins.len().to_string())],
-                );
-                log::info!(
-                    "Scanned {} plugins (with custom paths)",
-                    self.available_plugins.len()
-                );
-            }
-            Err(e) => {
-                self.status_message = self
-                    .i18n
-                    .trf("status.scan_error", &[("error", &e.to_string())]);
-                log::error!("Plugin scan failed: {}", e);
-            }
-        }
+        self.scan_plugins();
     }
 
     pub(crate) fn start_audio(&mut self) {
@@ -294,6 +413,29 @@ impl ToneDockApp {
         } else {
             self.status_message = self.i18n.tr("status.audio_running").into();
         }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn rescan_delta(&mut self) {
+        if self.scanning_in_progress {
+            return;
+        }
+        self.scanning_in_progress = true;
+        self.status_message = self.i18n.tr("status.scanning").into();
+
+        let existing = self.available_plugins.clone();
+        let custom_paths = self.custom_plugin_paths.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.scan_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let mut scanner = crate::vst_host::scanner::PluginScanner::new();
+            for path in &custom_paths {
+                scanner.add_path(path.clone());
+            }
+            let new_plugins = scanner.scan_delta(&existing);
+            let _ = tx.send(ScanResult::Delta(new_plugins));
+        });
     }
 
     pub(crate) fn set_language(&mut self, lang: Language) {

@@ -10,8 +10,19 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
     let Some(ref mut state) = app.preferences_state else {
         return;
     };
-    let pref_result =
-        crate::ui::preferences::show_preferences(ctx, state, &app.available_plugins, &app.i18n);
+    let midi_connected = app.midi_input.is_connected();
+    let midi_learning = app.midi_learning;
+    let midi_learn_target = app.midi_learn_target;
+    let pref_result = crate::ui::preferences::show_preferences(
+        ctx,
+        state,
+        &app.available_plugins,
+        &mut app.midi_map,
+        midi_connected,
+        midi_learning,
+        midi_learn_target,
+        &app.i18n,
+    );
     match pref_result {
         PreferencesResult::None => {}
         PreferencesResult::AudioApply {
@@ -109,6 +120,50 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
         }
         PreferencesResult::SetLanguage(lang) => {
             app.set_language(lang);
+        }
+        PreferencesResult::MidiConnect(idx) => {
+            let devices = crate::midi::MidiInput::enumerate_devices();
+            if let Some(device) = devices.get(idx) {
+                let device_name = device.name.clone();
+                match app.midi_input.open_device(idx) {
+                    Ok(()) => {
+                        app.settings.midi_device_name = Some(device_name.clone());
+                        app.settings_dirty = true;
+                        app.status_message = app
+                            .i18n
+                            .trf("prefs.midi_connected", &[("name", &device_name)]);
+                    }
+                    Err(e) => {
+                        app.status_message = app.i18n.trf("status.audio_error", &[("error", &e)]);
+                    }
+                }
+            }
+        }
+        PreferencesResult::MidiDisconnect => {
+            app.midi_input.close();
+            app.settings.midi_device_name = None;
+            app.settings_dirty = true;
+        }
+        PreferencesResult::MidiLearn(action) => {
+            app.start_midi_learn(action);
+        }
+        PreferencesResult::MidiClearBinding(action) => {
+            app.midi_map.remove_binding_for_action(action);
+        }
+        PreferencesResult::MidiSetTriggerMode(action, mode) => {
+            if let Some(binding) = app.midi_map.find_binding(action) {
+                let key = binding.key;
+                app.midi_map.set_binding(key, action, mode);
+            }
+        }
+        PreferencesResult::MidiClearAll => {
+            app.midi_map.clear();
+        }
+        PreferencesResult::DisablePluginPath(path) => {
+            if !app.disabled_plugin_paths.contains(&path) {
+                app.disabled_plugin_paths.push(path);
+            }
+            app.scan_plugins();
         }
     }
 }

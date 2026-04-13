@@ -198,6 +198,13 @@ pub(super) fn show_plugins_tab(
                                             .color(crate::ui::theme::TEXT_SECONDARY),
                                     );
                                 });
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.small_button(i18n.tr("prefs.disable_plugin")).clicked() {
+                                        result = PreferencesResult::DisablePluginPath(
+                                            plugin.path.clone(),
+                                        );
+                                    }
+                                });
                             });
                         });
                     ui.add_space(2.0);

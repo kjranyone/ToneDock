@@ -1,4 +1,5 @@
 mod audio_tab;
+mod midi_tab;
 mod plugins_tab;
 
 use egui::*;
@@ -7,15 +8,18 @@ use crate::i18n::{I18n, Language};
 use crate::vst_host::scanner::PluginInfo;
 
 pub use audio_tab::AudioSettingsState;
+pub use midi_tab::MidiTabState;
 
 pub enum PreferencesTab {
     Audio,
     Plugins,
+    Midi,
 }
 
 pub struct PreferencesState {
     pub tab: PreferencesTab,
     pub audio: AudioSettingsState,
+    pub midi: MidiTabState,
     pub custom_plugin_paths: Vec<std::path::PathBuf>,
     pub scan_status: String,
     pub inline_rack_plugin_gui: bool,
@@ -37,6 +41,13 @@ pub enum PreferencesResult {
     AddPluginPath(std::path::PathBuf),
     SetInlineRackPluginGui(bool),
     SetLanguage(Language),
+    MidiConnect(usize),
+    MidiDisconnect,
+    MidiLearn(crate::midi::MidiAction),
+    MidiClearBinding(crate::midi::MidiAction),
+    MidiSetTriggerMode(crate::midi::MidiAction, crate::midi::TriggerMode),
+    MidiClearAll,
+    DisablePluginPath(std::path::PathBuf),
 }
 
 impl PreferencesState {
@@ -58,6 +69,7 @@ impl PreferencesState {
                 current_input_ch,
                 current_output_ch,
             ),
+            midi: MidiTabState::new(),
             custom_plugin_paths,
             scan_status: String::new(),
             inline_rack_plugin_gui,
@@ -90,6 +102,10 @@ pub fn show_preferences(
     ctx: &Context,
     state: &mut PreferencesState,
     available_plugins: &[PluginInfo],
+    midi_map: &mut crate::midi::MidiMap,
+    midi_connected: bool,
+    midi_learning: bool,
+    midi_learn_target: Option<crate::midi::MidiAction>,
     i18n: &I18n,
 ) -> PreferencesResult {
     let mut result = PreferencesResult::None;
@@ -106,6 +122,7 @@ pub fn show_preferences(
                 ui.horizontal(|ui| {
                     let audio_selected = matches!(state.tab, PreferencesTab::Audio);
                     let plugins_selected = matches!(state.tab, PreferencesTab::Plugins);
+                    let midi_selected = matches!(state.tab, PreferencesTab::Midi);
 
                     if ui
                         .selectable_label(audio_selected, i18n.tr("prefs.audio"))
@@ -118,6 +135,12 @@ pub fn show_preferences(
                         .clicked()
                     {
                         state.tab = PreferencesTab::Plugins;
+                    }
+                    if ui
+                        .selectable_label(midi_selected, i18n.tr("prefs.midi"))
+                        .clicked()
+                    {
+                        state.tab = PreferencesTab::Midi;
                     }
                 });
 
@@ -159,6 +182,40 @@ pub fn show_preferences(
                             plugins_tab::show_plugins_tab(ui, state, available_plugins, i18n);
                         if matches!(result, PreferencesResult::None) {
                             result = plugins_result;
+                        }
+                    }
+                    PreferencesTab::Midi => {
+                        let midi_result = midi_tab::show_midi_tab(
+                            ui,
+                            &mut state.midi,
+                            midi_map,
+                            midi_connected,
+                            midi_learning,
+                            midi_learn_target,
+                            i18n,
+                        );
+                        if matches!(result, PreferencesResult::None) {
+                            result = match midi_result {
+                                midi_tab::MidiTabResult::None => PreferencesResult::None,
+                                midi_tab::MidiTabResult::Connect(idx) => {
+                                    PreferencesResult::MidiConnect(idx)
+                                }
+                                midi_tab::MidiTabResult::Disconnect => {
+                                    PreferencesResult::MidiDisconnect
+                                }
+                                midi_tab::MidiTabResult::Learn(action) => {
+                                    PreferencesResult::MidiLearn(action)
+                                }
+                                midi_tab::MidiTabResult::ClearBinding(action) => {
+                                    PreferencesResult::MidiClearBinding(action)
+                                }
+                                midi_tab::MidiTabResult::SetTriggerMode(action, mode) => {
+                                    PreferencesResult::MidiSetTriggerMode(action, mode)
+                                }
+                                midi_tab::MidiTabResult::ClearAll => {
+                                    PreferencesResult::MidiClearAll
+                                }
+                            };
                         }
                     }
                 }

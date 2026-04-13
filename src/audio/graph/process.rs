@@ -259,6 +259,9 @@ impl AudioGraph {
             NodeType::WetDry => self.process_wetdry_node(node_id, num_frames),
             NodeType::SendBus { .. } => self.process_send_bus_node(node_id, num_frames),
             NodeType::ReturnBus { .. } => self.process_return_bus_node(node_id, num_frames),
+            NodeType::BackingTrack => self.process_backing_track_node(node_id, num_frames),
+            NodeType::DrumMachine => self.process_drum_machine_node(node_id, num_frames),
+            NodeType::Recorder => self.process_recorder_node(node_id, num_frames),
         }
     }
 

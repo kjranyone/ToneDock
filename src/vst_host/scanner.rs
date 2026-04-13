@@ -34,6 +34,19 @@ impl PluginScanner {
         plugins
     }
 
+    pub fn scan_delta(&self, existing: &[PluginInfo]) -> Vec<PluginInfo> {
+        let mut all = Vec::new();
+        for search_path in &self.search_paths {
+            if search_path.exists() {
+                Self::scan_directory(search_path, &mut all);
+            }
+        }
+        let existing_paths: std::collections::HashSet<PathBuf> =
+            existing.iter().map(|p| p.path.clone()).collect();
+        all.retain(|p| !existing_paths.contains(&p.path));
+        all
+    }
+
     fn scan_directory(dir: &Path, plugins: &mut Vec<PluginInfo>) {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {

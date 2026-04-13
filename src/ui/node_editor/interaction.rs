@@ -357,6 +357,11 @@ impl NodeEditor {
                 menu_cmds.push(EdCmd::Commit);
                 ui.close_menu();
             }
+            if ui.button(i18n.tr("node.backing_track")).clicked() {
+                menu_cmds.push(EdCmd::AddNode(NodeType::BackingTrack, (mw.x, mw.y)));
+                menu_cmds.push(EdCmd::Commit);
+                ui.close_menu();
+            }
 
             ui.separator();
             ui.label(

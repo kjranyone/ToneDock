@@ -21,6 +21,44 @@ pub struct Preset {
     pub graph: SerializedGraph,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rack_order: Vec<NodeId>,
+    #[serde(default)]
+    pub transport: TransportState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TransportState {
+    #[serde(default)]
+    pub metronome_bpm: Option<f64>,
+    #[serde(default)]
+    pub metronome_volume: Option<f32>,
+    #[serde(default)]
+    pub metronome_enabled: Option<bool>,
+    #[serde(default)]
+    pub backing_track_volume: Option<f32>,
+    #[serde(default)]
+    pub backing_track_speed: Option<f32>,
+    #[serde(default)]
+    pub backing_track_looping: Option<bool>,
+    #[serde(default)]
+    pub backing_track_pitch_semitones: Option<f32>,
+    #[serde(default)]
+    pub backing_track_pre_roll_secs: Option<f64>,
+    #[serde(default)]
+    pub looper_pre_fader: Option<bool>,
+    #[serde(default)]
+    pub master_volume: Option<f32>,
+    #[serde(default)]
+    pub input_gain: Option<f32>,
+    #[serde(default)]
+    pub audio_host_id: Option<String>,
+    #[serde(default)]
+    pub input_device: Option<String>,
+    #[serde(default)]
+    pub output_device: Option<String>,
+    #[serde(default)]
+    pub sample_rate: Option<u32>,
+    #[serde(default)]
+    pub buffer_size: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +75,7 @@ impl Default for Preset {
             name: "Untitled".into(),
             graph: SerializedGraph::default(),
             rack_order: Vec::new(),
+            transport: TransportState::default(),
         }
     }
 }
@@ -69,7 +108,6 @@ impl Preset {
 }
 
 impl Session {
-    #[cfg(test)]
     pub fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
@@ -93,12 +131,14 @@ impl Session {
                     name: self.name.clone(),
                     graph,
                     rack_order: Vec::new(),
+                    transport: TransportState::default(),
                 };
             } else if !self.chain.is_empty() {
                 self.preset = Preset {
                     name: self.name.clone(),
                     graph: Self::migrate_legacy_session(&self.chain),
                     rack_order: Vec::new(),
+                    transport: TransportState::default(),
                 };
                 log::info!(
                     "Migrated {} legacy chain slots to preset graph format",
@@ -261,6 +301,7 @@ mod tests {
                 ],
             },
             rack_order: vec![NodeId(2)],
+            transport: TransportState::default(),
         };
 
         let dir = std::env::temp_dir().join("tonedock_test_roundtrip");
