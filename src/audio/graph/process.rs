@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use crate::audio::node::{NodeId, NodeType, PortId};
+use crate::audio::node::{NodeId, NodeType};
 
 use super::AudioGraph;
 
@@ -27,20 +25,15 @@ impl AudioGraph {
             }
         }
 
-        let process_order = self.process_order.clone();
-        for &node_id in &process_order {
+        for &node_id in &self.process_order {
             self.gather_inputs(node_id, num_frames);
 
-            let (enabled, bypassed) = {
-                let node = self.nodes.get(&node_id).unwrap();
-                (node.enabled, node.bypassed)
-            };
-
-            if !enabled {
+            let node = self.nodes.get(&node_id).unwrap();
+            if !node.enabled {
                 continue;
             }
 
-            if bypassed {
+            if node.bypassed {
                 self.bypass_node(node_id, num_frames);
                 continue;
             }
@@ -102,142 +95,92 @@ impl AudioGraph {
     }
 
     pub(super) fn gather_inputs(&self, node_id: NodeId, num_frames: usize) {
-        let max_frames = self.max_frames;
-
-        let incoming: Vec<(PortId, Vec<(NodeId, PortId)>)> = {
-            let mut port_map: HashMap<PortId, Vec<(NodeId, PortId)>> = HashMap::new();
-            for conn in &self.connections {
-                if conn.target_node == node_id {
-                    port_map
-                        .entry(conn.target_port)
-                        .or_default()
-                        .push((conn.source_node, conn.source_port));
-                }
-            }
-            port_map.into_iter().collect()
-        };
-
-        let input_ports_info: Vec<(usize, usize)> = {
+        let Some(compiled) = self.compiled_connections.get(&node_id) else {
+            // No incoming connections, ensure input buffers are silent
             let node = self.nodes.get(&node_id).unwrap();
-            node.input_ports
-                .iter()
-                .enumerate()
-                .map(|(i, p)| (i, p.channels.channel_count()))
-                .collect()
-        };
-
-        let mut new_input_buffers: Vec<Option<Vec<Vec<f32>>>> = vec![None; input_ports_info.len()];
-
-        for (target_port_id, sources) in incoming {
-            let port_idx = match input_ports_info.iter().position(|(i, _)| {
-                let node = self.nodes.get(&node_id).unwrap();
-                node.input_ports
-                    .get(*i)
-                    .map(|p| p.id == target_port_id)
-                    .unwrap_or(false)
-            }) {
-                Some(idx) => input_ports_info[idx].0,
-                None => continue,
-            };
-
-            let target_ch = input_ports_info
-                .iter()
-                .find(|(i, _)| *i == port_idx)
-                .map(|(_, ch)| *ch)
-                .unwrap_or(1);
-
-            let mut mixed = vec![vec![0.0f32; max_frames]; target_ch];
-
-            for (src_idx, (src_node_id, src_port_id)) in sources.iter().enumerate() {
-                let src_buffers: Vec<Vec<f32>> = {
-                    if let Some(src_node) = self.nodes.get(src_node_id) {
-                        if let Some(pidx) = src_node
-                            .output_ports
-                            .iter()
-                            .position(|p| p.id == *src_port_id)
-                        {
-                            let shared = src_node.shared_outputs.lock();
-                            if let Some(ref sb) = shared.get(pidx).and_then(|opt| opt.as_ref()) {
-                                sb.as_slice().to_vec()
-                            } else {
-                                drop(shared);
-                                let output_buffers = src_node.output_buffers.lock();
-                                if let Some(src_buf) = output_buffers.get(pidx) {
-                                    src_buf.clone()
-                                } else {
-                                    continue;
-                                }
-                            }
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                };
-
-                let src_ch_count = src_buffers.len();
-                let target_ch_count = mixed.len();
-
-                if src_idx == 0 {
-                    if src_ch_count == target_ch_count {
-                        for ch in 0..target_ch_count {
-                            let copy_len =
-                                num_frames.min(mixed[ch].len()).min(src_buffers[ch].len());
-                            mixed[ch][..copy_len].copy_from_slice(&src_buffers[ch][..copy_len]);
-                        }
-                    } else if src_ch_count == 1 && target_ch_count == 2 {
-                        let copy_len = num_frames.min(mixed[0].len()).min(src_buffers[0].len());
-                        mixed[0][..copy_len].copy_from_slice(&src_buffers[0][..copy_len]);
-                        mixed[1][..copy_len].copy_from_slice(&src_buffers[0][..copy_len]);
-                    } else if src_ch_count == 2 && target_ch_count == 1 {
-                        let copy_len = num_frames.min(mixed[0].len()).min(src_buffers[0].len());
-                        for i in 0..copy_len {
-                            mixed[0][i] = (src_buffers[0][i] + src_buffers[1][i]) * 0.5;
-                        }
-                    }
-                } else {
-                    if src_ch_count == target_ch_count {
-                        for ch in 0..target_ch_count {
-                            let len = num_frames.min(mixed[ch].len()).min(src_buffers[ch].len());
-                            for i in 0..len {
-                                mixed[ch][i] += src_buffers[ch][i];
-                            }
-                        }
-                    } else if src_ch_count == 1 && target_ch_count == 2 {
-                        let len = num_frames.min(mixed[0].len()).min(src_buffers[0].len());
-                        for i in 0..len {
-                            mixed[0][i] += src_buffers[0][i];
-                            mixed[1][i] += src_buffers[0][i];
-                        }
-                    } else if src_ch_count == 2 && target_ch_count == 1 {
-                        let len = num_frames.min(mixed[0].len()).min(src_buffers[0].len());
-                        for i in 0..len {
-                            mixed[0][i] += (src_buffers[0][i] + src_buffers[1][i]) * 0.5;
-                        }
+            let mut input_buffers = node.input_buffers.lock();
+            for opt_buf in input_buffers.iter_mut() {
+                if let Some(buf) = opt_buf {
+                    for ch in buf.iter_mut() {
+                        ch.fill(0.0);
                     }
                 }
             }
-
-            if port_idx < new_input_buffers.len() {
-                new_input_buffers[port_idx] = Some(mixed);
-            }
-        }
+            return;
+        };
 
         let node = self.nodes.get(&node_id).unwrap();
-        {
-            let ports = &node.input_ports;
-            for (i, port) in ports.iter().enumerate() {
-                if i >= new_input_buffers.len() {
-                    break;
-                }
-                if new_input_buffers[i].is_none() {
-                    let ch_count = port.channels.channel_count();
-                    new_input_buffers[i] = Some(vec![vec![0.0f32; max_frames]; ch_count]);
+        let mut input_buffers = node.input_buffers.lock();
+
+        // 1. Clear existing input buffers
+        for opt_buf in input_buffers.iter_mut() {
+            if let Some(buf) = opt_buf {
+                for ch in buf.iter_mut() {
+                    ch.fill(0.0);
                 }
             }
         }
-        *node.input_buffers.lock() = new_input_buffers;
+
+        // 2. Aggregate from sources
+        for cc in compiled {
+            let Some(src_node) = self.nodes.get(&cc.source_node) else {
+                continue;
+            };
+
+            let src_buffers: Vec<Vec<f32>> = {
+                let shared = src_node.shared_outputs.lock();
+                if let Some(sb) = shared.get(cc.source_port_idx).and_then(|o| o.as_ref()) {
+                    sb.as_slice().to_vec()
+                } else {
+                    drop(shared);
+                    let ob = src_node.output_buffers.lock();
+                    ob.get(cc.source_port_idx).cloned().unwrap_or_default()
+                }
+            };
+
+            if src_buffers.is_empty() {
+                continue;
+            }
+
+            let target_port_idx = cc.target_port_idx;
+            let target_ch = src_buffers.len();
+            if let Some(opt_buf) = input_buffers.get_mut(target_port_idx) {
+                if opt_buf.is_none() {
+                    *opt_buf = Some(vec![vec![0.0f32; num_frames]; target_ch]);
+                }
+            }
+
+            if let Some(Some(target_buf)) = input_buffers.get_mut(target_port_idx) {
+                let src_ch = src_buffers.len();
+                let dst_ch = target_buf.len();
+
+                if src_ch == dst_ch {
+                    for ch in 0..src_ch {
+                        let len = num_frames
+                            .min(src_buffers[ch].len())
+                            .min(target_buf[ch].len());
+                        for i in 0..len {
+                            target_buf[ch][i] += src_buffers[ch][i];
+                        }
+                    }
+                } else if src_ch == 1 && dst_ch == 2 {
+                    let len = num_frames
+                        .min(src_buffers[0].len())
+                        .min(target_buf[0].len());
+                    for i in 0..len {
+                        target_buf[0][i] += src_buffers[0][i];
+                        target_buf[1][i] += src_buffers[0][i];
+                    }
+                } else if src_ch == 2 && dst_ch == 1 {
+                    let len = num_frames
+                        .min(src_buffers[0].len())
+                        .min(target_buf[0].len());
+                    for i in 0..len {
+                        target_buf[0][i] += (src_buffers[0][i] + src_buffers[1][i]) * 0.5;
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn process_node(&self, node_id: NodeId, num_frames: usize) {

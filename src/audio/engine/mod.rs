@@ -13,6 +13,7 @@ use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, HostId, Stream};
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::audio::graph::AudioGraph;
@@ -50,12 +51,14 @@ pub struct AudioEngine {
     pub sample_rate: f64,
     pub buffer_size: u32,
     pub graph: Arc<ArcSwap<AudioGraph>>,
-    pub master_volume: Arc<Mutex<f32>>,
-    pub input_gain: Arc<Mutex<f32>>,
-    pub output_level: Arc<Mutex<(f32, f32)>>,
-    pub input_level: Arc<Mutex<(f32, f32)>>,
-    pub cpu_usage: Arc<Mutex<f32>>,
-    pub dropout_count: Arc<Mutex<u64>>,
+    pub master_volume: Arc<AtomicU32>,
+    pub input_gain: Arc<AtomicU32>,
+    pub output_level_l: Arc<AtomicU32>,
+    pub output_level_r: Arc<AtomicU32>,
+    pub input_level_l: Arc<AtomicU32>,
+    pub input_level_r: Arc<AtomicU32>,
+    pub cpu_usage: Arc<AtomicU32>,
+    pub dropout_count: Arc<AtomicU64>,
     pub input_channel: usize,
     pub output_channels: (usize, usize),
     #[allow(dead_code)]
@@ -177,12 +180,15 @@ impl AudioEngine {
             sample_rate,
             buffer_size,
             graph: Arc::new(ArcSwap::from_pointee(graph)),
-            master_volume: Arc::new(Mutex::new(0.8)),
-            input_gain: Arc::new(Mutex::new(1.0)),
-            output_level: Arc::new(Mutex::new((0.0, 0.0))),
-            input_level: Arc::new(Mutex::new((0.0, 0.0))),
-            cpu_usage: Arc::new(Mutex::new(0.0)),
-            dropout_count: Arc::new(Mutex::new(0)),
+            master_volume: Arc::new(AtomicU32::new(0.8f32.to_bits())),
+            input_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            output_level_l: Arc::new(AtomicU32::new(0)),
+            output_level_r: Arc::new(AtomicU32::new(0)),
+            input_level_l: Arc::new(AtomicU32::new(0)),
+            input_level_r: Arc::new(AtomicU32::new(0)),
+            cpu_usage: Arc::new(AtomicU32::new(0)),
+            dropout_count: Arc::new(AtomicU64::new(0)),
+
             input_channel: 0.min(in_channels.saturating_sub(1)),
             output_channels: (0, if out_channels > 1 { 1 } else { 0 }),
             stream: None,
@@ -250,8 +256,10 @@ impl AudioEngine {
         let graph = self.graph.clone();
         let master_volume = self.master_volume.clone();
         let input_gain = self.input_gain.clone();
-        let output_level = self.output_level.clone();
-        let input_level = self.input_level.clone();
+        let output_level_l = self.output_level_l.clone();
+        let output_level_r = self.output_level_r.clone();
+        let input_level_l = self.input_level_l.clone();
+        let input_level_r = self.input_level_r.clone();
         let cpu_usage = self.cpu_usage.clone();
         let dropout_count = self.dropout_count.clone();
         let output_ch = self.output_channels;
@@ -315,7 +323,7 @@ impl AudioEngine {
                 let channels = out_ch_count.max(1);
                 let num_frames = data.len() / channels;
 
-                let gain = *input_gain.lock();
+                let gain = f32::from_bits(input_gain.load(Ordering::Relaxed));
 
                 let mut input_mono = vec![0.0f32; num_frames];
                 {
@@ -325,12 +333,12 @@ impl AudioEngine {
                 }
 
                 {
-                    let mut il = input_level.lock();
                     let mut peak = 0.0f32;
                     for frame in 0..num_frames {
                         peak = peak.max(input_mono[frame].abs());
                     }
-                    *il = (peak, peak);
+                    input_level_l.store(peak.to_bits(), Ordering::Relaxed);
+                    input_level_r.store(peak.to_bits(), Ordering::Relaxed);
                 }
 
                 {
@@ -358,7 +366,7 @@ impl AudioEngine {
                     output_stereo = guard.process(&input, num_frames);
                 }
 
-                let vol = *master_volume.lock();
+                let vol = f32::from_bits(master_volume.load(Ordering::Relaxed));
                 let out_l = output_ch.0.min(channels - 1);
                 let out_r = output_ch.1.min(channels - 1);
 
@@ -384,16 +392,14 @@ impl AudioEngine {
                     }
                 }
 
-                {
-                    let mut ol = output_level.lock();
-                    *ol = (peak_l, peak_r);
-                }
+                output_level_l.store(peak_l.to_bits(), Ordering::Relaxed);
+                output_level_r.store(peak_r.to_bits(), Ordering::Relaxed);
 
                 {
                     let elapsed = callback_start.elapsed().as_secs_f64();
                     let buffer_duration = num_frames as f64 / actual_sample_rate as f64;
                     let usage = (elapsed / buffer_duration * 100.0).min(100.0) as f32;
-                    *cpu_usage.lock() = usage;
+                    cpu_usage.store(usage.to_bits(), Ordering::Relaxed);
                 }
 
                 {
@@ -405,7 +411,7 @@ impl AudioEngine {
                     let buffer_ns =
                         (num_frames as f64 / actual_sample_rate as f64) * 1_000_000_000.0;
                     if delta.as_nanos() as f64 > buffer_ns * 0.95 {
-                        *dropout_count.lock() += 1;
+                        dropout_count.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             },

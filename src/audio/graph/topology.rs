@@ -242,6 +242,40 @@ impl AudioGraph {
 
         let order = self.topological_sort()?;
         self.process_order = order;
+
+        let mut compiled = HashMap::new();
+        for conn in &self.connections {
+            let Some(target_node) = self.nodes.get(&conn.target_node) else {
+                continue;
+            };
+            let Some(target_port_idx) = target_node
+                .input_ports
+                .iter()
+                .position(|p| p.id == conn.target_port)
+            else {
+                continue;
+            };
+            let Some(source_node) = self.nodes.get(&conn.source_node) else {
+                continue;
+            };
+            let Some(source_port_idx) = source_node
+                .output_ports
+                .iter()
+                .position(|p| p.id == conn.source_port)
+            else {
+                continue;
+            };
+            compiled
+                .entry(conn.target_node)
+                .or_insert_with(Vec::new)
+                .push(super::CompiledConnection {
+                    source_node: conn.source_node,
+                    source_port_idx,
+                    target_port_idx,
+                });
+        }
+        self.compiled_connections = compiled;
+
         let mf = self.max_frames;
         for node in self.nodes.values() {
             let mut output_buffers = node.output_buffers.lock();

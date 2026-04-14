@@ -25,6 +25,14 @@ fn drum_pattern(idx: u8) -> &'static [u8; 16] {
     }
 }
 
+fn cubic_interp(v0: f32, v1: f32, v2: f32, v3: f32, frac: f32) -> f32 {
+    let a = -0.5 * v0 + 1.5 * v1 - 1.5 * v2 + 0.5 * v3;
+    let b = v0 - 2.5 * v1 + 2.0 * v2 - 0.5 * v3;
+    let c = -0.5 * v0 + 0.5 * v2;
+    let d = v1;
+    a * frac * frac * frac + b * frac * frac + c * frac + d
+}
+
 impl AudioGraph {
     pub(super) fn process_metronome_node(&self, node_id: NodeId, num_frames: usize) {
         let (bpm, volume, count_in_beats, count_in_active) = {
@@ -253,83 +261,93 @@ impl AudioGraph {
         for frame in 0..num_frames {
             let pos = buf.playback_pos;
             let pos_floor = pos.floor() as usize;
-            let frac = pos - pos_floor as f64;
-
-            if pos_floor >= buf.total_frames {
-                if looping {
-                    buf.playback_pos = ab_start.unwrap_or(0) as f64;
-                    continue;
-                } else {
-                    for ch in 0..out_ch {
-                        if frame < out_buf[ch].len() {
-                            out_buf[ch][frame] = 0.0;
-                        }
-                    }
-                    continue;
-                }
-            }
+            let frac = (pos - pos_floor as f64) as f32;
 
             if let (Some(start), Some(end)) = (ab_start, ab_end) {
                 if end > start && pos_floor >= end {
-                    buf.playback_pos = start as f64;
+                    if looping {
+                        buf.playback_pos = start as f64 + (pos - end as f64);
+                        continue;
+                    } else {
+                        for ch in 0..out_ch {
+                            for f in &mut out_buf[ch][frame..num_frames] {
+                                *f = 0.0;
+                            }
+                        }
+                        break;
+                    }
+                }
+            } else if pos_floor >= buf.total_frames {
+                if looping {
+                    buf.playback_pos = pos - buf.total_frames as f64;
                     continue;
+                } else {
+                    for ch in 0..out_ch {
+                        for f in &mut out_buf[ch][frame..num_frames] {
+                            *f = 0.0;
+                        }
+                    }
+                    break;
                 }
             }
 
-            let s0 = pos_floor;
-            let s1 = if s0 + 1 < buf.total_frames {
-                s0 + 1
-            } else if looping {
-                ab_start.unwrap_or(0)
+            // Cubic Hermite Interpolation (4-point)
+            let s1 = pos_floor;
+            let (range_start, range_end) = if let (Some(s), Some(e)) = (ab_start, ab_end) {
+                (s, e)
             } else {
-                s0
+                (0, buf.total_frames)
+            };
+
+            let s0 = if s1 > range_start {
+                s1 - 1
+            } else if looping {
+                range_end.saturating_sub(1)
+            } else {
+                s1
+            };
+            let s2 = if s1 + 1 < range_end {
+                s1 + 1
+            } else if looping {
+                range_start
+            } else {
+                s1
+            };
+            let s3 = if s2 + 1 < range_end {
+                s2 + 1
+            } else if looping {
+                range_start + (s2 + 1 - range_end)
+            } else {
+                s2
             };
 
             for ch in 0..out_ch.min(src_ch) {
-                let v0 = buf
-                    .data
-                    .get(ch)
-                    .and_then(|d| d.get(s0))
-                    .copied()
-                    .unwrap_or(0.0);
-                let v1 = buf
-                    .data
-                    .get(ch)
-                    .and_then(|d| d.get(s1))
-                    .copied()
-                    .unwrap_or(0.0);
-                let sample = (v0 + (v1 - v0) * frac as f32) * volume;
+                let data = &buf.data[ch];
+                let v0 = data.get(s0).copied().unwrap_or(0.0);
+                let v1 = data.get(s1).copied().unwrap_or(0.0);
+                let v2 = data.get(s2).copied().unwrap_or(0.0);
+                let v3 = data.get(s3).copied().unwrap_or(0.0);
+
+                let sample = cubic_interp(v0, v1, v2, v3, frac) * volume;
                 if frame < out_buf[ch].len() {
                     out_buf[ch][frame] += sample;
                 }
             }
 
             if src_ch == 1 && out_ch >= 2 {
-                let v0 = buf
-                    .data
-                    .first()
-                    .and_then(|d| d.get(s0))
-                    .copied()
-                    .unwrap_or(0.0);
-                let v1 = buf
-                    .data
-                    .first()
-                    .and_then(|d| d.get(s1))
-                    .copied()
-                    .unwrap_or(0.0);
-                let sample = (v0 + (v1 - v0) * frac as f32) * volume;
+                let data = &buf.data[0];
+                let v0 = data.get(s0).copied().unwrap_or(0.0);
+                let v1 = data.get(s1).copied().unwrap_or(0.0);
+                let v2 = data.get(s2).copied().unwrap_or(0.0);
+                let v3 = data.get(s3).copied().unwrap_or(0.0);
+
+                let sample = cubic_interp(v0, v1, v2, v3, frac) * volume;
                 if frame < out_buf[1].len() {
                     out_buf[1][frame] += sample;
                 }
             }
 
             buf.playback_pos += ratio;
-            if buf.playback_pos >= buf.total_frames as f64 {
-                if looping {
-                    buf.playback_pos -= (buf.total_frames - ab_start.unwrap_or(0)) as f64;
-                    buf.playback_pos += ab_start.unwrap_or(0) as f64;
-                }
-            }
         }
     }
 

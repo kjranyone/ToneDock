@@ -32,11 +32,28 @@ impl Language {
             _ => None,
         }
     }
+
+    pub fn from_system_locale() -> Self {
+        let lang = std::env::var("LC_ALL")
+            .or_else(|_| std::env::var("LC_MESSAGES"))
+            .or_else(|_| std::env::var("LANG"))
+            .or_else(|_| std::env::var("LANGUAGE"))
+            .unwrap_or_default()
+            .to_lowercase();
+
+        let sys_lang = sys_locale::get_locale().unwrap_or_default().to_lowercase();
+
+        if lang.starts_with("ja") || sys_lang.starts_with("ja") {
+            Language::Ja
+        } else {
+            Language::En
+        }
+    }
 }
 
 impl Default for Language {
     fn default() -> Self {
-        Language::En
+        Self::from_system_locale()
     }
 }
 

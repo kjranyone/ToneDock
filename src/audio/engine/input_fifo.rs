@@ -1,7 +1,80 @@
-use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+pub(super) struct RingBuffer {
+    data: Vec<f32>,
+    capacity: usize,
+    write_pos: AtomicUsize,
+    read_pos: AtomicUsize,
+}
+
+impl RingBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            data: vec![0.0f32; capacity],
+            capacity,
+            write_pos: AtomicUsize::new(0),
+            read_pos: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn push(&self, sample: f32) {
+        let w = self.write_pos.load(Ordering::Relaxed);
+        let next_w = (w + 1) % self.capacity;
+        let r = self.read_pos.load(Ordering::Acquire);
+
+        if next_w == r {
+            // Buffer full, drop or advance read pos (overwrite)
+            let _ = self.read_pos.compare_exchange(
+                r,
+                (r + 1) % self.capacity,
+                Ordering::Release,
+                Ordering::Relaxed,
+            );
+        }
+
+        // Safety: We are the only producer (input thread)
+        let ptr = self.data.as_ptr() as *mut f32;
+        unsafe { *ptr.add(w) = sample };
+        self.write_pos.store(next_w, Ordering::Release);
+    }
+
+    pub fn pop(&self) -> Option<f32> {
+        let r = self.read_pos.load(Ordering::Relaxed);
+        let w = self.write_pos.load(Ordering::Acquire);
+
+        if r == w {
+            return None;
+        }
+
+        let sample = self.data[r];
+        self.read_pos
+            .store((r + 1) % self.capacity, Ordering::Release);
+        Some(sample)
+    }
+
+    pub fn len(&self) -> usize {
+        let w = self.write_pos.load(Ordering::Acquire);
+        let r = self.read_pos.load(Ordering::Acquire);
+        if w >= r {
+            w - r
+        } else {
+            self.capacity - r + w
+        }
+    }
+
+    pub fn skip(&self, count: usize) {
+        let r = self.read_pos.load(Ordering::Relaxed);
+        let w = self.write_pos.load(Ordering::Acquire);
+        let available = if w >= r { w - r } else { self.capacity - r + w };
+        let to_skip = count.min(available);
+        self.read_pos
+            .store((r + to_skip) % self.capacity, Ordering::Release);
+    }
+}
 
 pub(super) struct InputFifo {
-    channels: Vec<VecDeque<f32>>,
+    channels: Vec<Arc<RingBuffer>>,
     max_frames: usize,
     target_frames: usize,
 }
@@ -10,7 +83,7 @@ impl InputFifo {
     pub(super) fn new(max_channels: usize, max_frames: usize, target_frames: usize) -> Self {
         Self {
             channels: (0..max_channels)
-                .map(|_| VecDeque::with_capacity(max_frames))
+                .map(|_| Arc::new(RingBuffer::new(max_frames + 1)))
                 .collect(),
             max_frames,
             target_frames: target_frames.min(max_frames),
@@ -18,43 +91,9 @@ impl InputFifo {
     }
 
     fn ensure_channels(&mut self, channels: usize) {
-        if self.channels.len() >= channels {
-            return;
-        }
-        self.channels.extend(
-            (self.channels.len()..channels).map(|_| VecDeque::with_capacity(self.max_frames)),
-        );
-    }
-
-    fn available_frames(&self) -> usize {
-        self.channels.iter().map(VecDeque::len).min().unwrap_or(0)
-    }
-
-    fn trim_to_capacity(&mut self) {
-        let overflow = self.available_frames().saturating_sub(self.max_frames);
-        if overflow == 0 {
-            return;
-        }
-
-        for channel in &mut self.channels {
-            for _ in 0..overflow.min(channel.len()) {
-                let _ = channel.pop_front();
-            }
-        }
-    }
-
-    fn rebalance_for_output(&mut self, requested_frames: usize) {
-        let available = self.available_frames();
-        let keep = self.target_frames.saturating_add(requested_frames);
-        let overflow = available.saturating_sub(keep);
-        if overflow == 0 {
-            return;
-        }
-
-        for channel in &mut self.channels {
-            for _ in 0..overflow.min(channel.len()) {
-                let _ = channel.pop_front();
-            }
+        while self.channels.len() < channels {
+            self.channels
+                .push(Arc::new(RingBuffer::new(self.max_frames + 1)));
         }
     }
 
@@ -62,42 +101,44 @@ impl InputFifo {
         if channels == 0 {
             return;
         }
-
         self.ensure_channels(channels);
         let frames = data.len() / channels;
         for frame in 0..frames {
             for ch in 0..channels {
-                self.channels[ch].push_back(data[frame * channels + ch]);
+                self.channels[ch].push(data[frame * channels + ch]);
             }
         }
-        self.trim_to_capacity();
     }
 
-    pub(super) fn pop_mono_into(&mut self, channel: usize, output: &mut [f32], gain: f32) {
-        output.fill(0.0);
+    pub(super) fn pop_mono_into(&self, channel: usize, output: &mut [f32], gain: f32) {
         if self.channels.is_empty() {
+            output.fill(0.0);
             return;
         }
 
-        self.rebalance_for_output(output.len());
-        let frames = self.available_frames().min(output.len());
-        if frames == 0 {
-            return;
-        }
+        let src_ch = channel.min(self.channels.len() - 1);
+        let rb = &self.channels[src_ch];
 
-        let src_ch = channel.min(self.channels.len().saturating_sub(1));
-        for frame in 0..frames {
-            if let Some(sample) = self.channels[src_ch].pop_front() {
-                output[frame] = sample * gain;
+        let available = rb.len();
+        let requested = output.len();
+
+        // Rebalance logic: if we have way too many frames, skip them to reduce latency
+        let threshold = self.target_frames + requested * 2;
+        if available >= threshold {
+            let to_skip = available - self.target_frames - requested;
+            for ch_rb in &self.channels {
+                ch_rb.skip(to_skip);
             }
         }
 
-        for (ch, queue) in self.channels.iter_mut().enumerate() {
-            if ch == src_ch {
-                continue;
-            }
-            for _ in 0..frames.min(queue.len()) {
-                let _ = queue.pop_front();
+        for frame in 0..requested {
+            output[frame] = rb.pop().unwrap_or(0.0) * gain;
+        }
+
+        // Keep other channels in sync
+        for (i, ch_rb) in self.channels.iter().enumerate() {
+            if i != src_ch {
+                ch_rb.skip(requested);
             }
         }
     }

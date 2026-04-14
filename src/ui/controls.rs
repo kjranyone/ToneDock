@@ -1,6 +1,19 @@
 use crate::ui::theme::*;
 use egui::*;
 
+pub fn icon_btn(ui: &mut Ui, icon: &str, tooltip: &str) -> Response {
+    ui.add_sized([28.0, 24.0], Button::new(RichText::new(icon).size(15.0)))
+        .on_hover_text(tooltip)
+}
+
+pub fn icon_btn_fill(ui: &mut Ui, icon: &str, tooltip: &str, fill: Color32) -> Response {
+    ui.add_sized(
+        [28.0, 24.0],
+        Button::new(RichText::new(icon).size(15.0)).fill(fill),
+    )
+    .on_hover_text(tooltip)
+}
+
 pub fn draw_knob(ui: &mut Ui, value: &mut f32, label: &str, min: f32, max: f32, size: f32) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click_and_drag());
 

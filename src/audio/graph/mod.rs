@@ -425,10 +425,18 @@ impl GraphNode {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct CompiledConnection {
+    pub source_node: NodeId,
+    pub source_port_idx: usize,
+    pub target_port_idx: usize,
+}
+
 pub struct AudioGraph {
     pub(super) nodes: HashMap<NodeId, GraphNode>,
     pub(super) connections: Vec<Connection>,
     pub(super) process_order: Vec<NodeId>,
+    pub(super) compiled_connections: HashMap<NodeId, Vec<CompiledConnection>>,
     pub(super) input_node_id: Option<NodeId>,
     pub(super) output_node_id: Option<NodeId>,
     pub(super) max_frames: usize,
@@ -443,6 +451,7 @@ impl Clone for AudioGraph {
             nodes: self.nodes.iter().map(|(&id, n)| (id, n.clone())).collect(),
             connections: self.connections.clone(),
             process_order: self.process_order.clone(),
+            compiled_connections: self.compiled_connections.clone(),
             input_node_id: self.input_node_id,
             output_node_id: self.output_node_id,
             max_frames: self.max_frames,
@@ -459,6 +468,7 @@ impl AudioGraph {
             nodes: HashMap::new(),
             connections: Vec::new(),
             process_order: Vec::new(),
+            compiled_connections: HashMap::new(),
             input_node_id: None,
             output_node_id: None,
             max_frames,

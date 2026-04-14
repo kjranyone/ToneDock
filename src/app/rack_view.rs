@@ -1,4 +1,5 @@
 use egui::*;
+use std::sync::atomic::Ordering;
 
 use super::ToneDockApp;
 use crate::audio::node::{NodeId, NodeType};
@@ -291,7 +292,10 @@ impl ToneDockApp {
                         );
                         ui.add_space(8.0);
 
-                        let (out_l, out_r) = *self.audio_engine.output_level.lock();
+                        let (out_l, out_r) = (
+                            f32::from_bits(self.audio_engine.output_level_l.load(Ordering::Relaxed)),
+                            f32::from_bits(self.audio_engine.output_level_r.load(Ordering::Relaxed)),
+                        );
                         crate::ui::meters::draw_stereo_meter(
                             ui,
                             self.i18n.tr("rack.master_out"),
@@ -303,7 +307,7 @@ impl ToneDockApp {
 
                         ui.add_space(6.0);
 
-                        let (in_l, _) = *self.audio_engine.input_level.lock();
+                        let in_l = f32::from_bits(self.audio_engine.input_level_l.load(Ordering::Relaxed));
                         crate::ui::meters::draw_mono_meter(
                             ui,
                             self.i18n.tr("rack.mono_input"),
@@ -433,7 +437,10 @@ impl ToneDockApp {
                         );
                         ui.add_space(8.0);
 
-                        let (out_l, out_r) = *self.audio_engine.output_level.lock();
+                        let (out_l, out_r) = (
+                            f32::from_bits(self.audio_engine.output_level_l.load(Ordering::Relaxed)),
+                            f32::from_bits(self.audio_engine.output_level_r.load(Ordering::Relaxed)),
+                        );
                         crate::ui::meters::draw_stereo_meter(
                             ui,
                             self.i18n.tr("rack.output"),
@@ -443,7 +450,7 @@ impl ToneDockApp {
                             48.0,
                         );
                         ui.add_space(4.0);
-                        let (in_l, _) = *self.audio_engine.input_level.lock();
+                        let in_l = f32::from_bits(self.audio_engine.input_level_l.load(Ordering::Relaxed));
                         crate::ui::meters::draw_mono_meter(
                             ui,
                             self.i18n.tr("rack.mono_input"),

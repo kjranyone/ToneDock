@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use crate::audio::engine::AudioEngine;
 use crate::audio::node::NodeId;
@@ -137,8 +138,9 @@ pub struct ToneDockApp {
     backing_track_looping: bool,
     backing_track_file_name: Option<String>,
     backing_track_duration: f64,
-
+    backing_track_section_markers: Vec<f64>,
     recorder_node_id: Option<NodeId>,
+
     drum_machine_node_id: Option<NodeId>,
 
     preset_a: Option<String>,
@@ -234,6 +236,7 @@ impl ToneDockApp {
             backing_track_looping: true,
             backing_track_file_name: None,
             backing_track_duration: 0.0,
+            backing_track_section_markers: Vec::new(),
             recorder_node_id: None,
             drum_machine_node_id: None,
             preset_a: None,
@@ -265,8 +268,8 @@ impl ToneDockApp {
             scanning_in_progress: false,
         };
 
-        *app.audio_engine.master_volume.lock() = app.master_volume;
-        *app.audio_engine.input_gain.lock() = app.input_gain;
+        app.audio_engine.master_volume.store(app.master_volume.to_bits(), Ordering::Relaxed);
+        app.audio_engine.input_gain.store(app.input_gain.to_bits(), Ordering::Relaxed);
 
         app.scan_plugins();
         app.restore_audio_config();

@@ -299,4 +299,9 @@
   "transport.drum_vol": "音量",
   "transport.drum_pattern": "パターン",
   "transport.add_marker": "+マーク",
+  "toolbar.timer_format": "{mins}:{secs}",
+  "toolbar.cpu_format": "CPU {cpu}%",
+  "toolbar.latency_format": "{ms}ms",
+  "transport.time_format": "{pos_mins}:{pos_secs}/{dur_mins}:{dur_secs}",
+  "transport.loop_duration_format": "{secs}秒"
 }

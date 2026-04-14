@@ -1,5 +1,6 @@
 use super::autosave_path;
 use super::ToneDockApp;
+use std::sync::atomic::Ordering;
 use crate::audio::node::{NodeId, NodeInternalState, NodeType};
 use crate::session::{Preset, Session, TransportState};
 
@@ -356,12 +357,14 @@ impl ToneDockApp {
         }
         if let Some(vol) = transport.master_volume {
             self.master_volume = vol;
-            *self.audio_engine.master_volume.lock() = vol;
+            self.audio_engine.master_volume.store(vol.to_bits(), Ordering::Relaxed);
         }
+
         if let Some(gain) = transport.input_gain {
             self.input_gain = gain;
-            *self.audio_engine.input_gain.lock() = gain;
+            self.audio_engine.input_gain.store(gain.to_bits(), Ordering::Relaxed);
         }
+
         if transport.output_device.is_some()
             || transport.sample_rate.is_some()
             || transport.buffer_size.is_some()

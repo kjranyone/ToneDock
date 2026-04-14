@@ -18,6 +18,8 @@ pub enum MidiAction {
     MasterVolumeUp,
     MasterVolumeDown,
     ToggleBypassSelected,
+    BackingNextSection,
+    BackingPrevSection,
 }
 
 impl MidiAction {
@@ -39,6 +41,8 @@ impl MidiAction {
             MidiAction::MasterVolumeUp => "Master Volume Up",
             MidiAction::MasterVolumeDown => "Master Volume Down",
             MidiAction::ToggleBypassSelected => "Toggle Bypass (Selected)",
+            MidiAction::BackingNextSection => "Backing Next Section",
+            MidiAction::BackingPrevSection => "Backing Prev Section",
         }
     }
 
@@ -60,6 +64,8 @@ impl MidiAction {
             MidiAction::MasterVolumeUp,
             MidiAction::MasterVolumeDown,
             MidiAction::ToggleBypassSelected,
+            MidiAction::BackingNextSection,
+            MidiAction::BackingPrevSection,
         ]
     }
 }
