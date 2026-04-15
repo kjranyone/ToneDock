@@ -208,6 +208,47 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                 }
 
                 {
+                    let mut bpm_goal = app.settings.bpm_goal.unwrap_or(0.0);
+                    ui.add_sized(
+                        [44.0, 16.0],
+                        egui::DragValue::new(&mut bpm_goal)
+                            .speed(1.0)
+                            .range(0.0..=300.0)
+                            .custom_formatter(|v, _| {
+                                if v < 1.0 {
+                                    "—".into()
+                                } else {
+                                    format!("{:.0} BPM", v)
+                                }
+                            })
+                            .custom_parser(|s| {
+                                if s == "—" {
+                                    Some(0.0)
+                                } else {
+                                    s.trim_end_matches(" BPM").parse().ok()
+                                }
+                            }),
+                    )
+                    .on_hover_text(app.i18n.tr("toolbar.bpm_goal"));
+                    let new_goal = if bpm_goal < 1.0 { None } else { Some(bpm_goal) };
+                    if new_goal != app.settings.bpm_goal {
+                        app.settings.bpm_goal = new_goal;
+                        app.settings_dirty = true;
+                    }
+                }
+
+                if let Some(goal) = app.settings.bpm_goal {
+                    if goal > 0.0 && (app.metronome_bpm - goal).abs() < 0.5 {
+                        ui.label(
+                            RichText::new(app.i18n.tr("toolbar.goal_reached"))
+                                .size(9.0)
+                                .color(crate::ui::theme::ACCENT_WARM)
+                                .strong(),
+                        );
+                    }
+                }
+
+                {
                     let timer_icon = if app.practice_timer_start.is_some() {
                         "\u{23F1}"
                     } else {
@@ -373,9 +414,10 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                             .color(crate::ui::theme::TEXT_SECONDARY),
                     );
 
-                    if let Some(start) = app.practice_timer_start {
-                        let elapsed = start.elapsed();
-                        let secs = elapsed.as_secs();
+                    let current_elapsed = app.practice_timer_start.map_or(0, |s| s.elapsed().as_secs());
+
+                    if current_elapsed > 0 {
+                        let secs = current_elapsed;
                         let mins = secs / 60;
                         let secs = secs % 60;
                         ui.label(
@@ -386,6 +428,22 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                                 .size(9.0)
                                 .color(crate::ui::theme::ACCENT_WARM),
                         );
+                    }
+
+                    {
+                        let total = app.settings.total_practice_secs + current_elapsed;
+                        if total > 0 {
+                            let hours = total / 3600;
+                            let mins = (total % 3600) / 60;
+                            ui.label(
+                                RichText::new(app.i18n.trf("toolbar.total_practice", &[
+                                    ("hours", &hours.to_string()),
+                                    ("mins", &format!("{:02}", mins)),
+                                ]))
+                                    .size(9.0)
+                                    .color(crate::ui::theme::TEXT_SECONDARY),
+                            );
+                        }
                     }
 
                     let cpu = f32::from_bits(app.audio_engine.cpu_usage.load(Ordering::Relaxed));
