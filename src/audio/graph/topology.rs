@@ -276,8 +276,54 @@ impl AudioGraph {
         }
         self.compiled_connections = compiled;
 
+        self.id_to_index.clear();
+        self.nodes_vec = self
+            .process_order
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                self.id_to_index.insert(id, i);
+                self.nodes.get(&id).cloned().unwrap()
+            })
+            .collect();
+
+        self.input_node_idx = self
+            .input_node_id
+            .and_then(|id| self.id_to_index.get(&id).copied());
+        self.output_node_idx = self
+            .output_node_id
+            .and_then(|id| self.id_to_index.get(&id).copied());
+        self.metronome_idx = None;
+        for node in self.nodes_vec.iter() {
+            if matches!(node.node_type, NodeType::Metronome) {
+                self.metronome_idx = self.id_to_index.get(&node.id).copied();
+                break;
+            }
+        }
+
+        let n = self.nodes_vec.len();
+        self.compiled_connections_vec = vec![Vec::new(); n];
+        for (&id, conns) in &self.compiled_connections {
+            let Some(&target_idx) = self.id_to_index.get(&id) else {
+                continue;
+            };
+            let compiled_idx: Vec<super::CompiledConnectionIdx> = conns
+                .iter()
+                .filter_map(|cc| {
+                    self.id_to_index.get(&cc.source_node).map(|&src_idx| {
+                        super::CompiledConnectionIdx {
+                            source_idx: src_idx,
+                            source_port_idx: cc.source_port_idx,
+                            target_port_idx: cc.target_port_idx,
+                        }
+                    })
+                })
+                .collect();
+            self.compiled_connections_vec[target_idx] = compiled_idx;
+        }
+
         let mf = self.max_frames;
-        for node in self.nodes.values() {
+        for node in self.nodes_vec.iter() {
             let b = node.buffers_mut();
             for port_buf in b.output_buffers.iter_mut() {
                 for ch_buf in port_buf.iter_mut() {

@@ -507,6 +507,13 @@ pub(super) struct CompiledConnection {
     pub target_port_idx: usize,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct CompiledConnectionIdx {
+    pub source_idx: usize,
+    pub source_port_idx: usize,
+    pub target_port_idx: usize,
+}
+
 pub struct AudioGraph {
     pub(super) nodes: HashMap<NodeId, GraphNode>,
     pub(super) connections: Vec<Connection>,
@@ -518,6 +525,13 @@ pub struct AudioGraph {
     pub(super) sample_rate: f64,
     pub(super) topology_dirty: bool,
     pub(super) next_node_id: u64,
+
+    pub(super) nodes_vec: Vec<GraphNode>,
+    pub(super) compiled_connections_vec: Vec<Vec<CompiledConnectionIdx>>,
+    pub(super) id_to_index: HashMap<NodeId, usize>,
+    pub(super) input_node_idx: Option<usize>,
+    pub(super) output_node_idx: Option<usize>,
+    pub(super) metronome_idx: Option<usize>,
 }
 
 impl Clone for AudioGraph {
@@ -533,6 +547,12 @@ impl Clone for AudioGraph {
             sample_rate: self.sample_rate,
             topology_dirty: self.topology_dirty,
             next_node_id: self.next_node_id,
+            nodes_vec: Vec::new(),
+            compiled_connections_vec: Vec::new(),
+            id_to_index: HashMap::new(),
+            input_node_idx: None,
+            output_node_idx: None,
+            metronome_idx: None,
         }
     }
 }
@@ -550,6 +570,12 @@ impl AudioGraph {
             sample_rate,
             topology_dirty: true,
             next_node_id: 1,
+            nodes_vec: Vec::new(),
+            compiled_connections_vec: Vec::new(),
+            id_to_index: HashMap::new(),
+            input_node_idx: None,
+            output_node_idx: None,
+            metronome_idx: None,
         }
     }
 

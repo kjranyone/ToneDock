@@ -1,12 +1,12 @@
-use crate::audio::node::{NodeId, NodeType};
+use crate::audio::node::NodeType;
 
 use super::AudioGraph;
 
 impl AudioGraph {
     pub(super) fn process_internal(&self, input: &[Vec<f32>], num_frames: usize) {
         if self.topology_dirty {
-            if let Some(input_id) = self.input_node_id {
-                let input_node = self.nodes.get(&input_id).unwrap();
+            if let Some(input_idx) = self.input_node_idx {
+                let input_node = &self.nodes_vec[input_idx];
                 let b = input_node.buffers_mut();
                 if let Some(out_buf) = b.output_buffers.get_mut(0) {
                     for ch in out_buf.iter_mut() {
@@ -18,13 +18,12 @@ impl AudioGraph {
             return;
         }
 
-        for &node_id in &self.process_order {
-            let node = self.nodes.get(&node_id).unwrap();
+        for node in &self.nodes_vec {
             node.clear_output_buffers();
         }
 
-        if let Some(input_id) = self.input_node_id {
-            let input_node = self.nodes.get(&input_id).unwrap();
+        if let Some(input_idx) = self.input_node_idx {
+            let input_node = &self.nodes_vec[input_idx];
             let b = input_node.buffers_mut();
             if let Some(out_buf) = b.output_buffers.get_mut(0) {
                 let ch_count = out_buf.len().min(input.len());
@@ -35,25 +34,20 @@ impl AudioGraph {
             }
         }
 
-        for &node_id in &self.process_order {
-            self.gather_inputs(node_id, num_frames);
+        let n = self.nodes_vec.len();
+        for idx in 0..n {
+            self.gather_inputs(idx, num_frames);
 
-            let should_process = {
-                let node = self.nodes.get(&node_id).unwrap();
-                node.enabled && !node.bypassed
-            };
-            if !should_process {
-                let node = self.nodes.get(&node_id).unwrap();
-                if !node.enabled {
-                    continue;
-                }
-                if node.bypassed {
-                    self.bypass_node(node_id, num_frames);
-                    continue;
-                }
+            let node = &self.nodes_vec[idx];
+            if !node.enabled {
+                continue;
+            }
+            if node.bypassed {
+                self.bypass_node(idx, num_frames);
+                continue;
             }
 
-            self.process_node(node_id, num_frames);
+            self.process_node(idx, num_frames);
         }
     }
 
@@ -61,9 +55,8 @@ impl AudioGraph {
     pub fn process(&self, input: &[Vec<f32>], num_frames: usize) -> Vec<Vec<f32>> {
         self.process_internal(input, num_frames);
 
-        let output_id = self.output_node_id;
-        if let Some(output_id) = output_id {
-            let output_node = self.nodes.get(&output_id).unwrap();
+        if let Some(output_idx) = self.output_node_idx {
+            let output_node = &self.nodes_vec[output_idx];
             let b = output_node.buffers();
             if let Some(buf) = b.input_buffers.get(0).and_then(|opt| opt.as_ref()) {
                 let ch_count = buf.len().min(2);
@@ -91,9 +84,8 @@ impl AudioGraph {
 
         self.process_internal(input, num_frames);
 
-        let output_id = self.output_node_id;
-        if let Some(output_id) = output_id {
-            let output_node = self.nodes.get(&output_id).unwrap();
+        if let Some(output_idx) = self.output_node_idx {
+            let output_node = &self.nodes_vec[output_idx];
             let b = output_node.buffers();
             if let Some(buf) = b.input_buffers.get(0).and_then(|opt| opt.as_ref()) {
                 let ch_count = buf.len().min(output.len());
@@ -109,11 +101,11 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn gather_inputs(&self, node_id: NodeId, num_frames: usize) {
-        let has_connections = self.compiled_connections.contains_key(&node_id);
+    pub(super) fn gather_inputs(&self, idx: usize, num_frames: usize) {
+        let conns = &self.compiled_connections_vec[idx];
 
-        if !has_connections {
-            let node = self.nodes.get(&node_id).unwrap();
+        {
+            let node = &self.nodes_vec[idx];
             let b = node.buffers_mut();
             for opt_buf in b.input_buffers.iter_mut() {
                 if let Some(buf) = opt_buf {
@@ -122,26 +114,15 @@ impl AudioGraph {
                     }
                 }
             }
+        }
+
+        if conns.is_empty() {
             return;
         }
 
-        let compiled = self.compiled_connections.get(&node_id).unwrap();
-
-        {
-            let node = self.nodes.get(&node_id).unwrap();
-            let b = node.buffers_mut();
-            for opt_buf in b.input_buffers.iter_mut() {
-                if let Some(buf) = opt_buf {
-                    for ch in buf.iter_mut() {
-                        ch.fill(0.0);
-                    }
-                }
-            }
-        }
-
-        for cc in compiled {
+        for cc in conns.iter() {
             let src_buffers: &[Vec<f32>] = {
-                let src_node = self.nodes.get(&cc.source_node).unwrap();
+                let src_node = &self.nodes_vec[cc.source_idx];
                 let sb = src_node.buffers();
                 if let Some(Some(shared)) = sb.shared_outputs.get(cc.source_port_idx) {
                     shared.as_slice()
@@ -160,7 +141,7 @@ impl AudioGraph {
             let target_ch = src_buffers.len();
 
             {
-                let node = self.nodes.get(&node_id).unwrap();
+                let node = &self.nodes_vec[idx];
                 let b = node.buffers_mut();
                 if let Some(opt_buf) = b.input_buffers.get_mut(cc.target_port_idx) {
                     if opt_buf.is_none() {
@@ -169,7 +150,7 @@ impl AudioGraph {
                 }
             }
 
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             let b = node.buffers_mut();
             if let Some(Some(target_buf)) = b.input_buffers.get_mut(cc.target_port_idx) {
                 let src_ch = src_buffers.len();
@@ -204,29 +185,29 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_node(&self, node_id: NodeId, num_frames: usize) {
-        let node = self.nodes.get(&node_id).unwrap();
+    pub(super) fn process_node(&self, idx: usize, num_frames: usize) {
+        let node = &self.nodes_vec[idx];
         match &node.node_type {
             NodeType::AudioInput | NodeType::AudioOutput => {}
-            NodeType::Pan => self.process_pan_node(node_id, num_frames),
-            NodeType::Gain => self.process_gain_node(node_id, num_frames),
-            NodeType::Mixer { .. } => self.process_mixer_node(node_id, num_frames),
-            NodeType::Splitter { .. } => self.process_splitter_node(node_id, num_frames),
-            NodeType::ChannelConverter { .. } => self.process_converter_node(node_id, num_frames),
-            NodeType::Metronome => self.process_metronome_node(node_id, num_frames),
-            NodeType::Looper => self.process_looper_node(node_id, num_frames),
-            NodeType::VstPlugin { .. } => self.process_vst_node(node_id, num_frames),
-            NodeType::WetDry => self.process_wetdry_node(node_id, num_frames),
-            NodeType::SendBus { .. } => self.process_send_bus_node(node_id, num_frames),
-            NodeType::ReturnBus { .. } => self.process_return_bus_node(node_id, num_frames),
-            NodeType::BackingTrack => self.process_backing_track_node(node_id, num_frames),
-            NodeType::DrumMachine => self.process_drum_machine_node(node_id, num_frames),
-            NodeType::Recorder => self.process_recorder_node(node_id, num_frames),
+            NodeType::Pan => self.process_pan_node(idx, num_frames),
+            NodeType::Gain => self.process_gain_node(idx, num_frames),
+            NodeType::Mixer { .. } => self.process_mixer_node(idx, num_frames),
+            NodeType::Splitter { .. } => self.process_splitter_node(idx, num_frames),
+            NodeType::ChannelConverter { .. } => self.process_converter_node(idx, num_frames),
+            NodeType::Metronome => self.process_metronome_node(idx, num_frames),
+            NodeType::Looper => self.process_looper_node(idx, num_frames),
+            NodeType::VstPlugin { .. } => self.process_vst_node(idx, num_frames),
+            NodeType::WetDry => self.process_wetdry_node(idx, num_frames),
+            NodeType::SendBus { .. } => self.process_send_bus_node(idx, num_frames),
+            NodeType::ReturnBus { .. } => self.process_return_bus_node(idx, num_frames),
+            NodeType::BackingTrack => self.process_backing_track_node(idx, num_frames),
+            NodeType::DrumMachine => self.process_drum_machine_node(idx, num_frames),
+            NodeType::Recorder => self.process_recorder_node(idx, num_frames),
         }
     }
 
-    pub(super) fn bypass_node(&self, node_id: NodeId, num_frames: usize) {
-        let node = self.nodes.get(&node_id).unwrap();
+    pub(super) fn bypass_node(&self, idx: usize, num_frames: usize) {
+        let node = &self.nodes_vec[idx];
         let b = node.buffers();
         let in_ch_count = b
             .input_buffers

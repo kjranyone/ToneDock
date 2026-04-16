@@ -2,7 +2,7 @@ const RECORDER_MAX_SECS: f64 = 1800.0;
 
 use std::sync::atomic::Ordering;
 
-use crate::audio::node::{NodeId, NodeInternalState};
+use crate::audio::node::NodeInternalState;
 
 use super::AudioGraph;
 
@@ -38,9 +38,9 @@ fn cubic_interp(v0: f32, v1: f32, v2: f32, v3: f32, frac: f32) -> f32 {
 }
 
 impl AudioGraph {
-    pub(super) fn process_metronome_node(&self, node_id: NodeId, num_frames: usize) {
+    pub(super) fn process_metronome_node(&self, idx: usize, num_frames: usize) {
         let (bpm, volume, count_in_beats, count_in_active) = {
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             match &node.internal_state {
                 NodeInternalState::Metronome(state) => (
                     state.bpm,
@@ -58,7 +58,7 @@ impl AudioGraph {
         let sample_rate = self.sample_rate;
         let samples_per_beat = sample_rate * 60.0 / bpm.max(1.0);
 
-        let node = self.nodes.get(&node_id).unwrap();
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
 
         let total_beats = if count_in_active && count_in_beats > 0 {
@@ -105,7 +105,7 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_looper_node(&self, node_id: NodeId, num_frames: usize) {
+    pub(super) fn process_looper_node(&self, idx: usize, num_frames: usize) {
         let (recording, playing, overdubbing, enabled, active_track, fixed_length_beats): (
             bool,
             bool,
@@ -114,7 +114,7 @@ impl AudioGraph {
             u8,
             Option<u32>,
         ) = {
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             match &node.internal_state {
                 NodeInternalState::Looper(s) => (
                     s.recording,
@@ -132,22 +132,23 @@ impl AudioGraph {
             return;
         }
 
-        let bpm = self
-            .nodes
-            .values()
-            .find_map(|n| match &n.internal_state {
-                NodeInternalState::Metronome(s) => Some(s.bpm),
-                _ => None,
-            })
-            .unwrap_or(120.0)
-            .max(1.0);
+        let bpm = if let Some(metro_idx) = self.metronome_idx {
+            let node = &self.nodes_vec[metro_idx];
+            match &node.internal_state {
+                NodeInternalState::Metronome(s) => s.bpm,
+                _ => 120.0,
+            }
+        } else {
+            120.0
+        }
+        .max(1.0);
 
         let fixed_length_samples = fixed_length_beats.and_then(|beats| {
             let samples_per_beat = self.sample_rate * 60.0 / bpm;
             Some((beats as f64 * samples_per_beat) as usize)
         });
 
-        let node = self.nodes.get(&node_id).unwrap();
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
 
         if recording {
@@ -207,9 +208,9 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_backing_track_node(&self, node_id: NodeId, num_frames: usize) {
+    pub(super) fn process_backing_track_node(&self, idx: usize, num_frames: usize) {
         let (playing, volume, speed, pitch_semitones, looping, loop_start, loop_end, pre_roll_secs) = {
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             match &node.internal_state {
                 NodeInternalState::BackingTrack(state) => (
                     state.playing,
@@ -229,7 +230,7 @@ impl AudioGraph {
             return;
         }
 
-        let node = self.nodes.get(&node_id).unwrap();
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
 
         let Some(ref mut buf) = b.backing_track_buffer else {
@@ -386,9 +387,9 @@ impl AudioGraph {
             .store(buf.duration_secs().to_bits(), Ordering::Relaxed);
     }
 
-    pub(super) fn process_vst_node(&self, node_id: NodeId, num_frames: usize) {
+    pub(super) fn process_vst_node(&self, idx: usize, num_frames: usize) {
         let num_ch = {
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             node.output_ports
                 .first()
                 .map(|p| p.channels.channel_count())
@@ -399,7 +400,7 @@ impl AudioGraph {
             return;
         }
 
-        let node = self.nodes.get(&node_id).unwrap();
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
 
         let input_data = b.input_buffers.get(0).and_then(|opt| opt.as_ref());
@@ -443,9 +444,9 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_drum_machine_node(&self, node_id: NodeId, num_frames: usize) {
+    pub(super) fn process_drum_machine_node(&self, idx: usize, num_frames: usize) {
         let (bpm, volume, playing, pattern_idx) = {
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             match &node.internal_state {
                 NodeInternalState::DrumMachine(state) => {
                     (state.bpm, state.volume, state.playing, state.pattern)
@@ -458,7 +459,7 @@ impl AudioGraph {
             return;
         }
 
-        let node = self.nodes.get(&node_id).unwrap();
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
         let sample_rate = self.sample_rate;
         let samples_per_step = sample_rate * 60.0 / bpm.max(1.0) / 4.0;
@@ -523,9 +524,9 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_recorder_node(&self, node_id: NodeId, num_frames: usize) {
+    pub(super) fn process_recorder_node(&self, idx: usize, num_frames: usize) {
         let recording = {
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             match &node.internal_state {
                 NodeInternalState::Recorder(state) => state.recording,
                 _ => false,
@@ -536,7 +537,7 @@ impl AudioGraph {
             return;
         }
 
-        let node = self.nodes.get(&node_id).unwrap();
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
         let input_data = b.input_buffers.first().and_then(|opt| opt.as_ref());
 

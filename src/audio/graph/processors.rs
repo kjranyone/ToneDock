@@ -1,11 +1,11 @@
-use crate::audio::node::{NodeId, NodeInternalState};
+use crate::audio::node::NodeInternalState;
 
 use super::{AudioGraph, SharedBuffer};
 
 impl AudioGraph {
-    pub(super) fn process_pan_node(&self, node_id: NodeId, num_frames: usize) {
+    pub(super) fn process_pan_node(&self, idx: usize, num_frames: usize) {
         let pan_value = {
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             match &node.internal_state {
                 NodeInternalState::Pan { value } => *value,
                 _ => 0.0,
@@ -16,7 +16,7 @@ impl AudioGraph {
         let gain_l = angle.cos();
         let gain_r = angle.sin();
 
-        let node = self.nodes.get(&node_id).unwrap();
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
         let input_data = b.input_buffers.get(0).and_then(|opt| opt.as_ref());
         if let Some(input_buf) = input_data {
@@ -35,16 +35,16 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_gain_node(&self, node_id: NodeId, num_frames: usize) {
+    pub(super) fn process_gain_node(&self, idx: usize, num_frames: usize) {
         let gain_value = {
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             match &node.internal_state {
                 NodeInternalState::Gain { value } => *value,
                 _ => 1.0,
             }
         };
 
-        let node = self.nodes.get(&node_id).unwrap();
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
         let input_data = b.input_buffers.get(0).and_then(|opt| opt.as_ref());
         if let Some(input_buf) = input_data {
@@ -60,8 +60,8 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_mixer_node(&self, node_id: NodeId, num_frames: usize) {
-        let node = self.nodes.get(&node_id).unwrap();
+    pub(super) fn process_mixer_node(&self, idx: usize, num_frames: usize) {
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
         if let Some(out_buf) = b.output_buffers.get_mut(0) {
             for input_buf_opt in b.input_buffers.iter() {
@@ -78,8 +78,8 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_splitter_node(&self, node_id: NodeId, num_frames: usize) {
-        let node = self.nodes.get(&node_id).unwrap();
+    pub(super) fn process_splitter_node(&self, idx: usize, num_frames: usize) {
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
 
         let Some(input_data) = b.input_buffers.get(0).and_then(|opt| opt.as_ref()) else {
@@ -108,8 +108,8 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_converter_node(&self, node_id: NodeId, num_frames: usize) {
-        let node = self.nodes.get(&node_id).unwrap();
+    pub(super) fn process_converter_node(&self, idx: usize, num_frames: usize) {
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
 
         let Some(input_data) = b.input_buffers.get(0).and_then(|opt| opt.as_ref()) else {
@@ -145,9 +145,9 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_wetdry_node(&self, node_id: NodeId, num_frames: usize) {
+    pub(super) fn process_wetdry_node(&self, idx: usize, num_frames: usize) {
         let mix = {
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             match &node.internal_state {
                 NodeInternalState::WetDry { mix } => *mix,
                 _ => 0.5,
@@ -155,7 +155,7 @@ impl AudioGraph {
         };
 
         let inv_mix = 1.0 - mix;
-        let node = self.nodes.get(&node_id).unwrap();
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
 
         if let Some(out_buf) = b.output_buffers.get_mut(0) {
@@ -197,16 +197,16 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_send_bus_node(&self, node_id: NodeId, num_frames: usize) {
+    pub(super) fn process_send_bus_node(&self, idx: usize, num_frames: usize) {
         let send_level = {
-            let node = self.nodes.get(&node_id).unwrap();
+            let node = &self.nodes_vec[idx];
             match &node.internal_state {
                 NodeInternalState::SendBus { send_level } => *send_level,
                 _ => 1.0,
             }
         };
 
-        let node = self.nodes.get(&node_id).unwrap();
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
         let input_data = b.input_buffers.get(0).and_then(|opt| opt.as_ref());
 
@@ -230,8 +230,8 @@ impl AudioGraph {
         }
     }
 
-    pub(super) fn process_return_bus_node(&self, node_id: NodeId, num_frames: usize) {
-        let node = self.nodes.get(&node_id).unwrap();
+    pub(super) fn process_return_bus_node(&self, idx: usize, num_frames: usize) {
+        let node = &self.nodes_vec[idx];
         let b = node.buffers_mut();
         let input_data = b.input_buffers.get(0).and_then(|opt| opt.as_ref());
         if let Some(out_buf) = b.output_buffers.get_mut(0) {
