@@ -155,6 +155,7 @@ impl AudioGraph {
         }
         let node = self.nodes.get_mut(&node_id).unwrap();
         let target_idx = port_id.0 as usize;
+        let buffers = node.buffers.get_mut();
         while node.input_ports.len() <= target_idx {
             let next_id = node.input_ports.len() as u32;
             node.input_ports.push(Port {
@@ -163,8 +164,7 @@ impl AudioGraph {
                 direction: PortDirection::Input,
                 channels: ChannelConfig::Mono,
             });
-            let mut input_buffers = node.input_buffers.lock();
-            input_buffers.push(None);
+            buffers.input_buffers.push(None);
         }
     }
 
@@ -196,8 +196,8 @@ impl AudioGraph {
                 direction: PortDirection::Input,
                 channels: ChannelConfig::Mono,
             });
-            let mut input_buffers = node.input_buffers.lock();
-            input_buffers.push(None);
+            let buffers = node.buffers.get_mut();
+            buffers.input_buffers.push(None);
         }
     }
 
@@ -211,6 +211,7 @@ impl AudioGraph {
         };
 
         let node = self.nodes.get_mut(&node_id).unwrap();
+        let buffers = node.buffers.get_mut();
         while node.input_ports.len() > min_ports {
             let last = node.input_ports.last().unwrap();
             let last_connected = self
@@ -230,8 +231,7 @@ impl AudioGraph {
                 break;
             }
             node.input_ports.pop();
-            let mut input_buffers = node.input_buffers.lock();
-            input_buffers.pop();
+            buffers.input_buffers.pop();
         }
     }
 
@@ -278,8 +278,8 @@ impl AudioGraph {
 
         let mf = self.max_frames;
         for node in self.nodes.values() {
-            let mut output_buffers = node.output_buffers.lock();
-            for port_buf in output_buffers.iter_mut() {
+            let b = node.buffers_mut();
+            for port_buf in b.output_buffers.iter_mut() {
                 for ch_buf in port_buf.iter_mut() {
                     ch_buf.resize(mf, 0.0);
                 }

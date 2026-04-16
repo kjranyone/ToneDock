@@ -1,4 +1,4 @@
-use egui::*;
+﻿use egui::*;
 
 use super::ToneDockApp;
 use crate::ui::preferences::PreferencesResult;
@@ -10,14 +10,14 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
     let Some(ref mut state) = app.preferences_state else {
         return;
     };
-    let midi_connected = app.midi_input.is_connected();
-    let midi_learning = app.midi_learning;
-    let midi_learn_target = app.midi_learn_target;
+    let midi_connected = app.midi.input.is_connected();
+    let midi_learning = app.midi.learning;
+    let midi_learn_target = app.midi.learn_target;
     let pref_result = crate::ui::preferences::show_preferences(
         ctx,
         state,
         &app.available_plugins,
-        &mut app.midi_map,
+        &mut app.midi.map,
         midi_connected,
         midi_learning,
         midi_learn_target,
@@ -110,7 +110,7 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
             }
         }
         PreferencesResult::SetInlineRackPluginGui(enabled) => {
-            app.inline_rack_plugin_gui = enabled;
+            app.rack.inline_gui = enabled;
             app.close_all_rack_editors();
             app.status_message = if enabled {
                 app.i18n.tr("status.rack_gui_inline").into()
@@ -125,7 +125,7 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
             let devices = crate::midi::MidiInput::enumerate_devices();
             if let Some(device) = devices.get(idx) {
                 let device_name = device.name.clone();
-                match app.midi_input.open_device(idx) {
+                match app.midi.input.open_device(idx) {
                     Ok(()) => {
                         app.settings.midi_device_name = Some(device_name.clone());
                         app.settings_dirty = true;
@@ -140,7 +140,7 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
             }
         }
         PreferencesResult::MidiDisconnect => {
-            app.midi_input.close();
+            app.midi.input.close();
             app.settings.midi_device_name = None;
             app.settings_dirty = true;
         }
@@ -148,16 +148,16 @@ pub(super) fn draw_preferences_dialog(app: &mut ToneDockApp, ctx: &Context) {
             app.start_midi_learn(action);
         }
         PreferencesResult::MidiClearBinding(action) => {
-            app.midi_map.remove_binding_for_action(action);
+            app.midi.map.remove_binding_for_action(action);
         }
         PreferencesResult::MidiSetTriggerMode(action, mode) => {
-            if let Some(binding) = app.midi_map.find_binding(action) {
+            if let Some(binding) = app.midi.map.find_binding(action) {
                 let key = binding.key;
-                app.midi_map.set_binding(key, action, mode);
+                app.midi.map.set_binding(key, action, mode);
             }
         }
         PreferencesResult::MidiClearAll => {
-            app.midi_map.clear();
+            app.midi.map.clear();
         }
         PreferencesResult::DisablePluginPath(path) => {
             if !app.disabled_plugin_paths.contains(&path) {

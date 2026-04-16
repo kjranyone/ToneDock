@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use crate::audio::node::{Connection, NodeId, NodeInternalState};
 
@@ -87,17 +88,13 @@ impl AudioGraph {
             NodeInternalState::Looper(s) => s.active_track as usize,
             _ => 0,
         };
-        let looper = node.looper_buffer.lock();
-        match *looper {
-            Some(ref bufs) => bufs.get(active_track).map(|b| b.len).unwrap_or(0),
-            None => 0,
-        }
+        node.atomic_looper_lengths[active_track].load(Ordering::Relaxed)
     }
 
     pub fn clear_looper(&mut self, node_id: NodeId) {
         if let Some(node) = self.nodes.get(&node_id) {
-            let mut looper = node.looper_buffer.lock();
-            if let Some(ref mut bufs) = *looper {
+            let b = node.buffers_mut();
+            if let Some(ref mut bufs) = b.looper_buffer {
                 for buf in bufs.iter_mut() {
                     buf.clear();
                 }
@@ -129,8 +126,8 @@ impl AudioGraph {
             return;
         };
         if let Some(node) = self.nodes.get(&node_id) {
-            let mut looper = node.looper_buffer.lock();
-            *looper = Some(
+            let b = node.buffers_mut();
+            b.looper_buffer = Some(
                 (0..4)
                     .map(|_| LooperBuffer::new(ch, sample_rate, 120.0))
                     .collect(),
@@ -142,45 +139,39 @@ impl AudioGraph {
         let Some(node) = self.nodes.get(&node_id) else {
             return;
         };
-        *node.backing_track_buffer.lock() = Some(buffer);
+        let b = node.buffers_mut();
+        b.backing_track_buffer = Some(buffer);
     }
 
     pub fn backing_track_duration_secs(&self, node_id: NodeId) -> f64 {
         let Some(node) = self.nodes.get(&node_id) else {
             return 0.0;
         };
-        let buf = node.backing_track_buffer.lock();
-        match *buf {
-            Some(ref b) => b.duration_secs(),
-            None => 0.0,
-        }
+        f64::from_bits(node.atomic_bt_duration.load(Ordering::Relaxed))
     }
 
     pub fn backing_track_position_secs(&self, node_id: NodeId) -> f64 {
         let Some(node) = self.nodes.get(&node_id) else {
             return 0.0;
         };
-        let buf = node.backing_track_buffer.lock();
-        match *buf {
-            Some(ref b) => {
-                if b.sample_rate > 0.0 {
-                    b.playback_pos / b.sample_rate
-                } else {
-                    0.0
-                }
-            }
-            None => 0.0,
-        }
+        f64::from_bits(node.atomic_bt_position.load(Ordering::Relaxed))
     }
 
     pub fn backing_track_seek(&self, node_id: NodeId, position_secs: f64) {
         let Some(node) = self.nodes.get(&node_id) else {
             return;
         };
-        let mut buf = node.backing_track_buffer.lock();
-        if let Some(ref mut b) = *buf {
-            let pos = (position_secs * b.sample_rate).clamp(0.0, b.total_frames as f64);
-            b.playback_pos = pos;
+        let b = node.buffers_mut();
+        if let Some(ref mut buf) = b.backing_track_buffer {
+            let pos = (position_secs * buf.sample_rate).clamp(0.0, buf.total_frames as f64);
+            buf.playback_pos = pos;
+            let clamped_secs = if buf.sample_rate > 0.0 {
+                pos / buf.sample_rate
+            } else {
+                0.0
+            };
+            node.atomic_bt_position
+                .store(clamped_secs.to_bits(), Ordering::Relaxed);
         }
     }
 
@@ -191,8 +182,8 @@ impl AudioGraph {
             NodeInternalState::Looper(s) => s.active_track as usize,
             _ => 0,
         };
-        let looper = node.looper_buffer.lock();
-        match *looper {
+        let b = node.buffers();
+        match b.looper_buffer {
             Some(ref bufs) => bufs.get(active_track).and_then(|b| b.export_wav_samples()),
             None => None,
         }
@@ -203,8 +194,8 @@ impl AudioGraph {
         let Some(node) = self.nodes.get(&node_id) else {
             return;
         };
-        let mut looper = node.looper_buffer.lock();
-        if let Some(ref mut bufs) = *looper {
+        let b = node.buffers_mut();
+        if let Some(ref mut bufs) = b.looper_buffer {
             if let Some(buf) = bufs.get_mut(0) {
                 buf.import_samples(samples, count);
             }

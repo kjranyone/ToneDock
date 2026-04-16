@@ -1,4 +1,4 @@
-use egui::*;
+﻿use egui::*;
 
 use super::ToneDockApp;
 use crate::audio::node::NodeInternalState;
@@ -36,7 +36,7 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
                 draw_drum_section(app, ui);
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if let Some(id) = app.looper_node_id {
+                    if let Some(id) = app.transport.looper_node_id {
                         let guard = app.audio_engine.graph.load();
                         let loop_samples = guard.looper_loop_length(id);
                         drop(guard);
@@ -59,8 +59,8 @@ pub(super) fn draw_transport(app: &mut ToneDockApp, ctx: &Context) {
 }
 
 fn draw_metronome_section(app: &mut ToneDockApp, ui: &mut Ui) {
-    if crate::ui::controls::draw_toggle(ui, "", app.metronome_enabled, 14.0) {
-        app.metronome_enabled = !app.metronome_enabled;
+    if crate::ui::controls::draw_toggle(ui, "", app.transport.metronome_enabled, 14.0) {
+        app.transport.metronome_enabled = !app.transport.metronome_enabled;
         app.sync_metronome_state();
     }
     ui.label(
@@ -70,7 +70,7 @@ fn draw_metronome_section(app: &mut ToneDockApp, ui: &mut Ui) {
     );
 
     {
-        let mut bpm = app.metronome_bpm;
+        let mut bpm = app.transport.metronome_bpm;
         ui.add_sized(
             [46.0, 16.0],
             egui::DragValue::new(&mut bpm)
@@ -78,9 +78,9 @@ fn draw_metronome_section(app: &mut ToneDockApp, ui: &mut Ui) {
                 .range(40.0..=300.0),
         )
         .on_hover_text(app.i18n.tr("transport.bpm"));
-        if (bpm - app.metronome_bpm).abs() > 0.01 {
-            app.metronome_bpm = bpm;
-            if let Some(id) = app.metronome_node_id {
+        if (bpm - app.transport.metronome_bpm).abs() > 0.01 {
+            app.transport.metronome_bpm = bpm;
+            if let Some(id) = app.transport.metronome_node_id {
                 let mut st = app.build_metronome_state();
                 st.bpm = bpm;
                 app.audio_engine
@@ -90,12 +90,12 @@ fn draw_metronome_section(app: &mut ToneDockApp, ui: &mut Ui) {
     }
 
     {
-        let mut vol = app.metronome_volume;
+        let mut vol = app.transport.metronome_volume;
         ui.add_sized([48.0, 14.0], egui::Slider::new(&mut vol, 0.0..=1.0))
             .on_hover_text(app.i18n.tr("transport.vol"));
-        if (vol - app.metronome_volume).abs() > 0.001 {
-            app.metronome_volume = vol;
-            if let Some(id) = app.metronome_node_id {
+        if (vol - app.transport.metronome_volume).abs() > 0.001 {
+            app.transport.metronome_volume = vol;
+            if let Some(id) = app.transport.metronome_node_id {
                 let mut st = app.build_metronome_state();
                 st.volume = vol;
                 app.audio_engine
@@ -106,7 +106,7 @@ fn draw_metronome_section(app: &mut ToneDockApp, ui: &mut Ui) {
 
     {
         let mut count_in = false;
-        if let Some(id) = app.metronome_node_id {
+        if let Some(id) = app.transport.metronome_node_id {
             let guard = app.audio_engine.graph.load();
             if let Some(node) = guard.get_node(id) {
                 if let NodeInternalState::Metronome(ms) = &node.internal_state {
@@ -115,7 +115,7 @@ fn draw_metronome_section(app: &mut ToneDockApp, ui: &mut Ui) {
             }
         }
         if crate::ui::controls::draw_toggle(ui, "", count_in, 14.0) {
-            if let Some(id) = app.metronome_node_id {
+            if let Some(id) = app.transport.metronome_node_id {
                 let mut st = app.build_metronome_state();
                 st.count_in_beats = 4;
                 st.count_in_active = !count_in;
@@ -128,7 +128,7 @@ fn draw_metronome_section(app: &mut ToneDockApp, ui: &mut Ui) {
 }
 
 fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
-    let (cur_fixed, cur_quant) = if let Some(id) = app.looper_node_id {
+    let (cur_fixed, cur_quant) = if let Some(id) = app.transport.looper_node_id {
         let guard = app.audio_engine.graph.load();
         if let Some(node) = guard.get_node(id) {
             if let NodeInternalState::Looper(st) = &node.internal_state {
@@ -143,13 +143,13 @@ fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
         (None, false)
     };
 
-    if crate::ui::controls::draw_toggle(ui, "", app.looper_enabled, 14.0) {
-        app.looper_enabled = !app.looper_enabled;
-        if !app.looper_enabled {
-            app.looper_recording = false;
-            app.looper_playing = false;
-            app.looper_overdubbing = false;
-            if let Some(id) = app.looper_node_id {
+    if crate::ui::controls::draw_toggle(ui, "", app.transport.looper_enabled, 14.0) {
+        app.transport.looper_enabled = !app.transport.looper_enabled;
+        if !app.transport.looper_enabled {
+            app.transport.looper_recording = false;
+            app.transport.looper_playing = false;
+            app.transport.looper_overdubbing = false;
+            if let Some(id) = app.transport.looper_node_id {
                 let mut st = app.build_looper_state();
                 st.enabled = false;
                 st.cleared = true;
@@ -167,7 +167,7 @@ fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
     );
 
     {
-        let rec_fill = if app.looper_recording {
+        let rec_fill = if app.transport.looper_recording {
             Color32::from_rgb(112, 40, 40)
         } else {
             crate::ui::theme::SURFACE_CONTAINER_HIGH
@@ -180,15 +180,15 @@ fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
         )
         .clicked()
         {
-            app.looper_enabled = true;
-            app.looper_recording = !app.looper_recording;
-            app.looper_playing = !app.looper_recording;
+            app.transport.looper_enabled = true;
+            app.transport.looper_recording = !app.transport.looper_recording;
+            app.transport.looper_playing = !app.transport.looper_recording;
             app.sync_looper_state();
         }
     }
 
     {
-        let play_fill = if app.looper_playing {
+        let play_fill = if app.transport.looper_playing {
             Color32::from_rgb(56, 80, 62)
         } else {
             crate::ui::theme::SURFACE_CONTAINER_HIGH
@@ -201,14 +201,14 @@ fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
         )
         .clicked()
         {
-            app.looper_playing = !app.looper_playing;
-            app.looper_recording = false;
+            app.transport.looper_playing = !app.transport.looper_playing;
+            app.transport.looper_recording = false;
             app.sync_looper_state();
         }
     }
 
     {
-        let dub_fill = if app.looper_overdubbing {
+        let dub_fill = if app.transport.looper_overdubbing {
             Color32::from_rgb(88, 72, 30)
         } else {
             crate::ui::theme::SURFACE_CONTAINER_HIGH
@@ -216,10 +216,10 @@ fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
         if crate::ui::controls::icon_btn_fill(ui, "+", app.i18n.tr("transport.overdub"), dub_fill)
             .clicked()
         {
-            if app.looper_playing {
-                app.looper_overdubbing = !app.looper_overdubbing;
+            if app.transport.looper_playing {
+                app.transport.looper_overdubbing = !app.transport.looper_overdubbing;
             }
-            if let Some(id) = app.looper_node_id {
+            if let Some(id) = app.transport.looper_node_id {
                 app.audio_engine
                     .graph_set_state(id, NodeInternalState::Looper(app.build_looper_state()));
             }
@@ -227,10 +227,10 @@ fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
     }
 
     if crate::ui::controls::icon_btn(ui, "\u{2716}", app.i18n.tr("transport.clear")).clicked() {
-        app.looper_recording = false;
-        app.looper_playing = false;
-        app.looper_overdubbing = false;
-        if let Some(id) = app.looper_node_id {
+        app.transport.looper_recording = false;
+        app.transport.looper_playing = false;
+        app.transport.looper_overdubbing = false;
+        if let Some(id) = app.transport.looper_node_id {
             let mut st = app.build_looper_state();
             st.enabled = false;
             st.cleared = true;
@@ -256,7 +256,7 @@ fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
             } else {
                 beats_str.parse::<u32>().ok()
             };
-            if let Some(id) = app.looper_node_id {
+            if let Some(id) = app.transport.looper_node_id {
                 let mut st = app.build_looper_state();
                 st.fixed_length_beats = new_fixed;
                 st.quantize_start = cur_quant;
@@ -268,7 +268,7 @@ fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
     }
 
     if crate::ui::controls::draw_toggle(ui, "", cur_quant, 12.0) {
-        if let Some(id) = app.looper_node_id {
+        if let Some(id) = app.transport.looper_node_id {
             let mut st = app.build_looper_state();
             st.fixed_length_beats = cur_fixed;
             st.quantize_start = !cur_quant;
@@ -278,9 +278,9 @@ fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
         }
     }
 
-    if crate::ui::controls::draw_toggle(ui, "", app.looper_pre_fader, 12.0) {
-        app.looper_pre_fader = !app.looper_pre_fader;
-        if let Some(id) = app.looper_node_id {
+    if crate::ui::controls::draw_toggle(ui, "", app.transport.looper_pre_fader, 12.0) {
+        app.transport.looper_pre_fader = !app.transport.looper_pre_fader;
+        if let Some(id) = app.transport.looper_node_id {
             let mut st = app.build_looper_state();
             st.fixed_length_beats = cur_fixed;
             st.quantize_start = cur_quant;
@@ -291,15 +291,15 @@ fn draw_looper_section(app: &mut ToneDockApp, ui: &mut Ui) {
     }
 
     {
-        let mut track = app.looper_active_track;
+        let mut track = app.transport.looper_active_track;
         ui.add_sized(
             [22.0, 14.0],
             egui::DragValue::new(&mut track).speed(0.1).range(0..=3),
         )
         .on_hover_text("Trk");
-        if track != app.looper_active_track {
-            app.looper_active_track = track;
-            if let Some(id) = app.looper_node_id {
+        if track != app.transport.looper_active_track {
+            app.transport.looper_active_track = track;
+            if let Some(id) = app.transport.looper_node_id {
                 let mut st = app.build_looper_state();
                 st.fixed_length_beats = cur_fixed;
                 st.quantize_start = cur_quant;
@@ -327,17 +327,17 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
             .pick_file()
         {
             let id = app.audio_engine.ensure_backing_track_in_graph();
-            app.backing_track_node_id = Some(id);
+            app.transport.backing_track_node_id = Some(id);
             match app.audio_engine.load_backing_track_file(id, &path) {
                 Ok(()) => {
-                    app.backing_track_file_name =
+                    app.transport.backing_track_file_name =
                         path.file_name().map(|n| n.to_string_lossy().into_owned());
-                    app.backing_track_duration = app.audio_engine.backing_track_duration(id);
+                    app.transport.backing_track_duration = app.audio_engine.backing_track_duration(id);
                     app.status_message = app.i18n.trf(
                         "status.loaded_backing_track",
                         &[(
                             "name",
-                            &app.backing_track_file_name.as_deref().unwrap_or("?"),
+                            &app.transport.backing_track_file_name.as_deref().unwrap_or("?"),
                         )],
                     );
                 }
@@ -351,7 +351,7 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
         }
     }
 
-    if let Some(name) = &app.backing_track_file_name {
+    if let Some(name) = &app.transport.backing_track_file_name {
         let display_name = if name.len() > 14 {
             format!("{}...", &name[..11])
         } else {
@@ -365,7 +365,7 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
     }
 
     {
-        let play_fill = if app.backing_track_playing {
+        let play_fill = if app.transport.backing_track_playing {
             Color32::from_rgb(56, 80, 62)
         } else {
             crate::ui::theme::SURFACE_CONTAINER_HIGH
@@ -378,28 +378,28 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
         )
         .clicked()
         {
-            if app.backing_track_node_id.is_some() {
-                app.backing_track_playing = !app.backing_track_playing;
+            if app.transport.backing_track_node_id.is_some() {
+                app.transport.backing_track_playing = !app.transport.backing_track_playing;
                 app.sync_backing_track_state();
             }
         }
     }
 
     if crate::ui::controls::icon_btn(ui, "\u{25A0}", app.i18n.tr("transport.stop")).clicked() {
-        if let Some(id) = app.backing_track_node_id {
-            app.backing_track_playing = false;
+        if let Some(id) = app.transport.backing_track_node_id {
+            app.transport.backing_track_playing = false;
             app.audio_engine.backing_track_seek(id, 0.0);
             app.sync_backing_track_state();
         }
     }
 
     {
-        let mut vol = app.backing_track_volume;
+        let mut vol = app.transport.backing_track_volume;
         ui.add_sized([40.0, 14.0], egui::Slider::new(&mut vol, 0.0..=1.0))
             .on_hover_text(app.i18n.tr("transport.vol"));
-        if (vol - app.backing_track_volume).abs() > 0.001 {
-            app.backing_track_volume = vol;
-            if let Some(id) = app.backing_track_node_id {
+        if (vol - app.transport.backing_track_volume).abs() > 0.001 {
+            app.transport.backing_track_volume = vol;
+            if let Some(id) = app.transport.backing_track_node_id {
                 app.audio_engine.graph_set_state(
                     id,
                     NodeInternalState::BackingTrack(app.build_backing_track_state()),
@@ -410,7 +410,7 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
     }
 
     {
-        let mut speed = app.backing_track_speed;
+        let mut speed = app.transport.backing_track_speed;
         ui.add_sized(
             [34.0, 14.0],
             egui::DragValue::new(&mut speed)
@@ -418,9 +418,9 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
                 .range(0.25..=2.0),
         )
         .on_hover_text(app.i18n.tr("transport.speed"));
-        if (speed - app.backing_track_speed).abs() > 0.001 {
-            app.backing_track_speed = speed;
-            if let Some(id) = app.backing_track_node_id {
+        if (speed - app.transport.backing_track_speed).abs() > 0.001 {
+            app.transport.backing_track_speed = speed;
+            if let Some(id) = app.transport.backing_track_node_id {
                 app.audio_engine.graph_set_state(
                     id,
                     NodeInternalState::BackingTrack(app.build_backing_track_state()),
@@ -430,15 +430,15 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
         }
     }
 
-    if crate::ui::controls::draw_toggle(ui, "", app.backing_track_looping, 14.0) {
-        app.backing_track_looping = !app.backing_track_looping;
-        if app.backing_track_node_id.is_some() {
+    if crate::ui::controls::draw_toggle(ui, "", app.transport.backing_track_looping, 14.0) {
+        app.transport.backing_track_looping = !app.transport.backing_track_looping;
+        if app.transport.backing_track_node_id.is_some() {
             app.sync_backing_track_state();
         }
     }
 
     {
-        let mut pitch = app.backing_track_pitch_semitones;
+        let mut pitch = app.transport.backing_track_pitch_semitones;
         ui.add_sized(
             [34.0, 14.0],
             egui::DragValue::new(&mut pitch)
@@ -447,9 +447,9 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
                 .suffix("st"),
         )
         .on_hover_text(app.i18n.tr("transport.pitch"));
-        if (pitch - app.backing_track_pitch_semitones).abs() > 0.01 {
-            app.backing_track_pitch_semitones = pitch;
-            if let Some(id) = app.backing_track_node_id {
+        if (pitch - app.transport.backing_track_pitch_semitones).abs() > 0.01 {
+            app.transport.backing_track_pitch_semitones = pitch;
+            if let Some(id) = app.transport.backing_track_node_id {
                 app.audio_engine.graph_set_state(
                     id,
                     NodeInternalState::BackingTrack(app.build_backing_track_state()),
@@ -460,7 +460,7 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
     }
 
     {
-        let mut pre_roll = app.backing_track_pre_roll_secs;
+        let mut pre_roll = app.transport.backing_track_pre_roll_secs;
         ui.add_sized(
             [34.0, 14.0],
             egui::DragValue::new(&mut pre_roll)
@@ -469,9 +469,9 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
                 .suffix("s"),
         )
         .on_hover_text(app.i18n.tr("transport.pre_roll"));
-        if (pre_roll - app.backing_track_pre_roll_secs).abs() > 0.01 {
-            app.backing_track_pre_roll_secs = pre_roll;
-            if let Some(id) = app.backing_track_node_id {
+        if (pre_roll - app.transport.backing_track_pre_roll_secs).abs() > 0.01 {
+            app.transport.backing_track_pre_roll_secs = pre_roll;
+            if let Some(id) = app.transport.backing_track_node_id {
                 app.audio_engine.graph_set_state(
                     id,
                     NodeInternalState::BackingTrack(app.build_backing_track_state()),
@@ -481,9 +481,9 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
         }
     }
 
-    if let Some(id) = app.backing_track_node_id {
+    if let Some(id) = app.transport.backing_track_node_id {
         let pos = app.audio_engine.backing_track_position(id);
-        let dur = app.backing_track_duration;
+        let dur = app.transport.backing_track_duration;
         if dur > 0.0 {
             let pos_mins = (pos / 60.0) as u32;
             let pos_secs = (pos % 60.0) as u32;
@@ -561,7 +561,7 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
             let mut markers = cur_markers.clone();
             markers.push(pos);
             markers.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            app.backing_track_section_markers = markers.clone();
+            app.transport.backing_track_section_markers = markers.clone();
             let mut st = app.build_backing_track_state();
             st.loop_start = cur_ab_start;
             st.loop_end = cur_ab_end;
@@ -584,7 +584,7 @@ fn draw_backing_track_section(app: &mut ToneDockApp, ui: &mut Ui) {
 
 fn draw_drum_section(app: &mut ToneDockApp, ui: &mut Ui) {
     let (drum_playing, drum_bpm, drum_vol, drum_pattern) = if let Some(id) =
-        app.drum_machine_node_id
+        app.transport.drum_machine_node_id
     {
         let guard = app.audio_engine.graph.load();
         if let Some(node) = guard.get_node(id) {
@@ -601,10 +601,10 @@ fn draw_drum_section(app: &mut ToneDockApp, ui: &mut Ui) {
     };
 
     if crate::ui::controls::draw_toggle(ui, "", drum_playing, 14.0) {
-        if app.drum_machine_node_id.is_none() {
-            app.drum_machine_node_id = Some(app.audio_engine.add_drum_machine_node());
+        if app.transport.drum_machine_node_id.is_none() {
+            app.transport.drum_machine_node_id = Some(app.audio_engine.add_drum_machine_node());
         }
-        if let Some(id) = app.drum_machine_node_id {
+        if let Some(id) = app.transport.drum_machine_node_id {
             app.audio_engine.graph_set_state(
                 id,
                 NodeInternalState::DrumMachine(crate::audio::node::DrumMachineNodeState {
@@ -634,7 +634,7 @@ fn draw_drum_section(app: &mut ToneDockApp, ui: &mut Ui) {
         )
         .on_hover_text(app.i18n.tr("transport.drum_bpm"));
         if (bpm - drum_bpm).abs() > 0.01 {
-            if let Some(id) = app.drum_machine_node_id {
+            if let Some(id) = app.transport.drum_machine_node_id {
                 app.audio_engine.graph_set_state(
                     id,
                     NodeInternalState::DrumMachine(crate::audio::node::DrumMachineNodeState {
@@ -655,7 +655,7 @@ fn draw_drum_section(app: &mut ToneDockApp, ui: &mut Ui) {
         ui.add_sized([36.0, 14.0], egui::Slider::new(&mut vol, 0.0..=1.0))
             .on_hover_text(app.i18n.tr("transport.drum_vol"));
         if (vol - drum_vol).abs() > 0.001 {
-            if let Some(id) = app.drum_machine_node_id {
+            if let Some(id) = app.transport.drum_machine_node_id {
                 app.audio_engine.graph_set_state(
                     id,
                     NodeInternalState::DrumMachine(crate::audio::node::DrumMachineNodeState {
@@ -679,7 +679,7 @@ fn draw_drum_section(app: &mut ToneDockApp, ui: &mut Ui) {
         )
         .on_hover_text(app.i18n.tr("transport.drum_pattern"));
         if pat != drum_pattern {
-            if let Some(id) = app.drum_machine_node_id {
+            if let Some(id) = app.transport.drum_machine_node_id {
                 app.audio_engine.graph_set_state(
                     id,
                     NodeInternalState::DrumMachine(crate::audio::node::DrumMachineNodeState {

@@ -29,6 +29,29 @@ use device::{
 use helpers::{apply_command, commit_and_publish_graph};
 use input_fifo::InputFifo;
 
+struct AudioCallbackState {
+    dc_state: [f32; 2],
+    dc_coeff: f32,
+    cpu_ema: f32,
+}
+
+impl AudioCallbackState {
+    fn new(sample_rate: f64) -> Self {
+        let dc_coeff = 1.0 - (-2.0 * std::f32::consts::PI * 5.0 / sample_rate as f32).exp();
+        Self {
+            dc_state: [0.0; 2],
+            dc_coeff,
+            cpu_ema: 0.0,
+        }
+    }
+}
+
+#[inline]
+fn soft_clip(x: f32) -> f32 {
+    let x = x.clamp(-3.0, 3.0);
+    x * (27.0 + x * x) / (27.0 + 9.0 * x * x)
+}
+
 pub struct AudioHostInfo {
     pub id: HostId,
     pub name: String,
@@ -80,6 +103,7 @@ pub struct AudioEngine {
 
     pub(crate) command_tx: crossbeam_channel::Sender<GraphCommand>,
     pub(crate) command_rx: crossbeam_channel::Receiver<GraphCommand>,
+    callback_state: Arc<Mutex<AudioCallbackState>>,
 }
 
 impl AudioEngine {
@@ -207,6 +231,7 @@ impl AudioEngine {
             metronome_node_id: Some(metronome_id),
             looper_node_id: Some(looper_id),
             backing_track_node_id: None,
+            callback_state: Arc::new(Mutex::new(AudioCallbackState::new(48000.0))),
         })
     }
 
@@ -251,9 +276,13 @@ impl AudioEngine {
             )?;
         }
 
+        self.callback_state.lock().dc_coeff =
+            1.0 - (-2.0 * std::f32::consts::PI * 5.0 / actual_sample_rate as f32).exp();
+
         let cmd_rx = self.command_rx.clone();
 
         let graph = self.graph.clone();
+        let callback_state = self.callback_state.clone();
         let master_volume = self.master_volume.clone();
         let input_gain = self.input_gain.clone();
         let output_level_l = self.output_level_l.clone();
@@ -316,6 +345,15 @@ impl AudioEngine {
 
         let input_ch = effective_input_ch;
 
+        let prealloc_input = Arc::new(Mutex::new(vec![
+            vec![0.0f32; actual_buffer_size as usize];
+            1
+        ]));
+        let prealloc_output = Arc::new(Mutex::new(vec![
+            vec![0.0f32; actual_buffer_size as usize],
+            vec![0.0f32; actual_buffer_size as usize],
+        ]));
+
         let out_stream = output_device.build_output_stream(
             &out_config,
             move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
@@ -325,17 +363,20 @@ impl AudioEngine {
 
                 let gain = f32::from_bits(input_gain.load(Ordering::Relaxed));
 
-                let mut input_mono = vec![0.0f32; num_frames];
+                let mut input_vec = prealloc_input.lock();
+                input_vec[0].resize(num_frames, 0.0);
                 {
-                    input_buffer_for_output
-                        .lock()
-                        .pop_mono_into(input_ch, &mut input_mono, gain);
+                    input_buffer_for_output.lock().pop_mono_into(
+                        input_ch,
+                        &mut input_vec[0][..num_frames],
+                        gain,
+                    );
                 }
 
                 {
                     let mut peak = 0.0f32;
                     for frame in 0..num_frames {
-                        peak = peak.max(input_mono[frame].abs());
+                        peak = peak.max(input_vec[0][frame].abs());
                     }
                     input_level_l.store(peak.to_bits(), Ordering::Relaxed);
                     input_level_r.store(peak.to_bits(), Ordering::Relaxed);
@@ -347,6 +388,7 @@ impl AudioEngine {
                         pending.push(cmd);
                     }
                     if !pending.is_empty() {
+                        drop(input_vec);
                         let guard = graph.load();
                         let mut staging = (**guard).clone();
                         drop(guard);
@@ -356,62 +398,81 @@ impl AudioEngine {
                         if let Err(e) = commit_and_publish_graph(&graph, staging, None) {
                             log::error!("Topology commit in audio thread failed: {}", e);
                         }
+                        input_vec = prealloc_input.lock();
+                        input_vec[0].resize(num_frames, 0.0);
                     }
                 }
 
-                let mut output_stereo = vec![vec![0.0f32; num_frames]; 2];
                 {
-                    let guard = graph.load();
-                    let input = vec![input_mono];
-                    output_stereo = guard.process(&input, num_frames);
-                }
-
-                let vol = f32::from_bits(master_volume.load(Ordering::Relaxed));
-                let out_l = output_ch.0.min(channels - 1);
-                let out_r = output_ch.1.min(channels - 1);
-
-                let mut peak_l = 0.0f32;
-                let mut peak_r = 0.0f32;
-
-                for frame in 0..num_frames {
-                    let l = output_stereo[0].get(frame).copied().unwrap_or(0.0) * vol;
-                    let r = output_stereo[1].get(frame).copied().unwrap_or(0.0) * vol;
-
-                    peak_l = peak_l.max(l.abs());
-                    peak_r = peak_r.max(r.abs());
-
-                    data[frame * channels + out_l] = l;
-                    if out_r != out_l {
-                        data[frame * channels + out_r] = r;
+                    let mut out_v = prealloc_output.lock();
+                    for ch in out_v.iter_mut() {
+                        ch.resize(num_frames, 0.0);
                     }
+                    let guard = graph.load();
+                    guard.process_into(&input_vec, &mut out_v, num_frames);
+                    drop(input_vec);
 
-                    for ch in 0..channels {
-                        if ch != out_l && ch != out_r {
-                            data[frame * channels + ch] = (l + r) * 0.5;
+                    let vol = f32::from_bits(master_volume.load(Ordering::Relaxed));
+                    let out_l = output_ch.0.min(channels - 1);
+                    let out_r = output_ch.1.min(channels - 1);
+                    let need_mono_fill = channels > 2 || (channels == 2 && out_l == out_r);
+
+                    let mut peak_l = 0.0f32;
+                    let mut peak_r = 0.0f32;
+
+                    let mut cb = callback_state.lock();
+                    let n = num_frames.min(out_v[0].len()).min(out_v[1].len());
+
+                    for frame in 0..n {
+                        let l_raw = out_v[0][frame] * vol;
+                        let r_raw = out_v[1][frame] * vol;
+
+                        cb.dc_state[0] += cb.dc_coeff * (l_raw - cb.dc_state[0]);
+                        cb.dc_state[1] += cb.dc_coeff * (r_raw - cb.dc_state[1]);
+
+                        let l = soft_clip(l_raw - cb.dc_state[0]);
+                        let r = soft_clip(r_raw - cb.dc_state[1]);
+
+                        peak_l = peak_l.max(l.abs());
+                        peak_r = peak_r.max(r.abs());
+
+                        data[frame * channels + out_l] = l;
+                        if out_r != out_l {
+                            data[frame * channels + out_r] = r;
+                        }
+
+                        if need_mono_fill {
+                            let mid = (l + r) * 0.5;
+                            for ch in 0..channels {
+                                if ch != out_l && ch != out_r {
+                                    data[frame * channels + ch] = mid;
+                                }
+                            }
                         }
                     }
-                }
 
-                output_level_l.store(peak_l.to_bits(), Ordering::Relaxed);
-                output_level_r.store(peak_r.to_bits(), Ordering::Relaxed);
+                    output_level_l.store(peak_l.to_bits(), Ordering::Relaxed);
+                    output_level_r.store(peak_r.to_bits(), Ordering::Relaxed);
 
-                {
-                    let elapsed = callback_start.elapsed().as_secs_f64();
-                    let buffer_duration = num_frames as f64 / actual_sample_rate as f64;
-                    let usage = (elapsed / buffer_duration * 100.0).min(100.0) as f32;
-                    cpu_usage.store(usage.to_bits(), Ordering::Relaxed);
-                }
+                    {
+                        let elapsed = callback_start.elapsed().as_secs_f64();
+                        let buffer_duration = num_frames as f64 / actual_sample_rate as f64;
+                        let instant_usage = (elapsed / buffer_duration * 100.0).min(100.0) as f32;
+                        cb.cpu_ema = cb.cpu_ema * 0.9 + instant_usage * 0.1;
+                        cpu_usage.store(cb.cpu_ema.to_bits(), Ordering::Relaxed);
+                    }
 
-                {
-                    let ts = info.timestamp();
-                    let delta = ts
-                        .playback
-                        .duration_since(&ts.callback)
-                        .unwrap_or(std::time::Duration::ZERO);
-                    let buffer_ns =
-                        (num_frames as f64 / actual_sample_rate as f64) * 1_000_000_000.0;
-                    if delta.as_nanos() as f64 > buffer_ns * 0.95 {
-                        dropout_count.fetch_add(1, Ordering::Relaxed);
+                    {
+                        let ts = info.timestamp();
+                        let delta = ts
+                            .playback
+                            .duration_since(&ts.callback)
+                            .unwrap_or(std::time::Duration::ZERO);
+                        let buffer_ns =
+                            (num_frames as f64 / actual_sample_rate as f64) * 1_000_000_000.0;
+                        if delta.as_nanos() as f64 > buffer_ns * 0.95 {
+                            dropout_count.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
             },

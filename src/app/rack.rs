@@ -64,29 +64,32 @@ impl ToneDockApp {
         };
 
         self.audio_engine.chain_node_ids = ordered_ids;
-        self.rack_order
+        self.rack
+            .order
             .retain(|node_id: &NodeId| self.audio_engine.chain_node_ids.contains(node_id));
         for node_id in &self.audio_engine.chain_node_ids {
-            if !self.rack_order.contains(node_id) {
-                self.rack_order.push(*node_id);
+            if !self.rack.order.contains(node_id) {
+                self.rack.order.push(*node_id);
             }
         }
-        self.rack_plugin_editors
+        self.rack
+            .plugin_editors
             .retain(|node_id: &NodeId, editor: &mut PluginEditor| {
-                self.rack_order.contains(node_id) && editor.is_open()
+                self.rack.order.contains(node_id) && editor.is_open()
             });
 
         if self
-            .selected_rack_node
-            .is_some_and(|node_id| !self.rack_order.contains(&node_id))
+            .rack
+            .selected_node
+            .is_some_and(|node_id| !self.rack.order.contains(&node_id))
         {
-            self.selected_rack_node = None;
+            self.rack.selected_node = None;
             self.rack_view.selected_plugin = None;
         }
     }
 
     pub(crate) fn select_rack_plugin_node(&mut self, node_id: Option<NodeId>) {
-        self.selected_rack_node = node_id;
+        self.rack.selected_node = node_id;
         self.rack_view.selected_plugin = node_id;
         self.node_editor.set_selection(node_id);
     }
@@ -148,7 +151,7 @@ impl ToneDockApp {
         let node_id = self.audio_engine.add_node_with_position(node_type, x, y);
         self.audio_engine.load_vst_plugin_to_node(node_id, info)?;
         self.audio_engine.chain_node_ids.push(node_id);
-        self.rack_order.push(node_id);
+        self.rack.order.push(node_id);
         self.rebuild_rack_signal_chain();
         Ok(node_id)
     }
@@ -165,7 +168,7 @@ impl ToneDockApp {
 
         self.close_rack_editor(node_id);
         self.audio_engine.chain_node_ids.remove(index);
-        self.rack_order.retain(|id| *id != node_id);
+        self.rack.order.retain(|id| *id != node_id);
         if self.node_editor.selected_node() == Some(node_id) {
             self.node_editor.set_selection(None);
         }
@@ -175,14 +178,14 @@ impl ToneDockApp {
     }
 
     pub(crate) fn reorder_rack_plugin(&mut self, node_id: NodeId, target_index: usize) {
-        let Some(index) = self.rack_order.iter().position(|id| *id == node_id) else {
+        let Some(index) = self.rack.order.iter().position(|id| *id == node_id) else {
             return;
         };
-        if index == target_index || target_index >= self.rack_order.len() {
+        if index == target_index || target_index >= self.rack.order.len() {
             return;
         }
-        let node_id = self.rack_order.remove(index);
-        self.rack_order.insert(target_index, node_id);
+        let node_id = self.rack.order.remove(index);
+        self.rack.order.insert(target_index, node_id);
     }
 
     pub(crate) fn sync_rack_plugin_state(
@@ -197,26 +200,27 @@ impl ToneDockApp {
     }
 
     pub(crate) fn close_rack_editor(&mut self, node_id: NodeId) {
-        if let Some(mut editor) = self.rack_plugin_editors.remove(&node_id) {
+        if let Some(mut editor) = self.rack.plugin_editors.remove(&node_id) {
             editor.close();
         }
-        if self.inline_rack_editor_node == Some(node_id) {
-            self.inline_rack_editor_node = None;
+        if self.rack.inline_editor_node == Some(node_id) {
+            self.rack.inline_editor_node = None;
         }
     }
 
     pub(crate) fn close_all_rack_editors(&mut self) {
-        for (_, mut editor) in self.rack_plugin_editors.drain() {
+        for (_, mut editor) in self.rack.plugin_editors.drain() {
             editor.close();
         }
-        self.inline_rack_editor_node = None;
+        self.rack.inline_editor_node = None;
     }
 
     pub(crate) fn build_rack_slots(&mut self) -> Vec<RackSlotView> {
         self.rebuild_rack_projection_from_graph();
 
         let guard = self.audio_engine.graph.load();
-        self.rack_order
+        self.rack
+            .order
             .iter()
             .filter_map(|node_id| {
                 let node = guard.get_node(*node_id)?;
@@ -252,13 +256,15 @@ impl ToneDockApp {
                     bypassed: node.bypassed,
                     has_editor,
                     editor_open: self
-                        .rack_plugin_editors
+                        .rack
+                        .plugin_editors
                         .get(node_id)
                         .is_some_and(|editor: &PluginEditor| editor.is_open()),
                     preferred_editor_size: self
-                        .rack_plugin_editors
+                        .rack
+                        .plugin_editors
                         .get(node_id)
-                        .map(|editor| editor.preferred_size())
+                        .map(|editor: &PluginEditor| editor.preferred_size())
                         .unwrap_or((600, 400)),
                 })
             })

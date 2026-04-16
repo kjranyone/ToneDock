@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -103,6 +104,54 @@ fn transfer_runtime_plugins(
     Ok(())
 }
 
+pub(super) fn transfer_runtime_buffers(current: &AudioGraph, staging: &AudioGraph) {
+    for (&id, source_node) in current.nodes() {
+        let Some(target_node) = staging.get_node(id) else {
+            continue;
+        };
+
+        if source_node.node_type != target_node.node_type {
+            continue;
+        }
+
+        let sb = source_node.buffers();
+        let tb = target_node.buffers_mut();
+
+        if sb.looper_buffer.is_some() {
+            tb.looper_buffer = sb.looper_buffer.clone();
+        }
+        if sb.backing_track_buffer.is_some() {
+            tb.backing_track_buffer = sb.backing_track_buffer.clone();
+        }
+        if sb.recorder_buffer.is_some() {
+            tb.recorder_buffer = sb.recorder_buffer.clone();
+        }
+
+        tb.metronome_phase = sb.metronome_phase;
+        tb.metronome_click_remaining = sb.metronome_click_remaining;
+        tb.backing_pre_roll_remaining = sb.backing_pre_roll_remaining;
+        tb.drum_phase = sb.drum_phase;
+        tb.drum_step = sb.drum_step;
+
+        target_node.atomic_bt_position.store(
+            source_node.atomic_bt_position.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        target_node.atomic_bt_duration.store(
+            source_node.atomic_bt_duration.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        for (i, len) in source_node.atomic_looper_lengths.iter().enumerate() {
+            target_node.atomic_looper_lengths[i]
+                .store(len.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+        target_node.atomic_recorder_has_data.store(
+            source_node.atomic_recorder_has_data.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+    }
+}
+
 pub(super) fn commit_and_publish_graph(
     graph: &Arc<ArcSwap<AudioGraph>>,
     mut staging: AudioGraph,
@@ -114,6 +163,7 @@ pub(super) fn commit_and_publish_graph(
         .map_err(|e| anyhow::anyhow!("Topology commit failed: {}", e))?;
 
     let guard = graph.load();
+    transfer_runtime_buffers(&guard, &staging);
     transfer_runtime_plugins(&guard, &mut staging, runtime_config)?;
     drop(guard);
     graph.store(Arc::new(staging));

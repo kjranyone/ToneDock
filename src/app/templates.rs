@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use super::ToneDockApp;
 use crate::audio::node::{ChannelConfig, Connection, NodeInternalState, NodeType, PortId};
@@ -258,13 +258,13 @@ impl ToneDockApp {
             }
         };
 
-        self.metronome_bpm = bpm;
-        self.metronome_volume = metronome_vol;
-        if metronome_enabled && self.metronome_node_id.is_none() {
-            self.metronome_node_id = Some(self.audio_engine.add_metronome_node());
+        self.transport.metronome_bpm = bpm;
+        self.transport.metronome_volume = metronome_vol;
+        if metronome_enabled && self.transport.metronome_node_id.is_none() {
+            self.transport.metronome_node_id = Some(self.audio_engine.add_metronome_node());
         }
-        self.metronome_enabled = metronome_enabled;
-        if let Some(id) = self.metronome_node_id {
+        self.transport.metronome_enabled = metronome_enabled;
+        if let Some(id) = self.transport.metronome_node_id {
             self.audio_engine.graph_set_state(
                 id,
                 NodeInternalState::Metronome(crate::audio::node::MetronomeNodeState {

@@ -1,4 +1,4 @@
-use super::ToneDockApp;
+﻿use super::ToneDockApp;
 use crate::audio::node::{Connection, NodeInternalState, NodeType};
 use crate::ui::node_editor::EdCmd;
 use crate::undo::{UndoAction, UndoStep};
@@ -92,7 +92,7 @@ impl ToneDockApp {
                     {
                         self.close_rack_editor(id);
                         self.audio_engine.chain_node_ids.remove(index);
-                        if self.selected_rack_node == Some(id) {
+                        if self.rack.selected_node == Some(id) {
                             self.select_rack_plugin_node(None);
                         }
                         self.rebuild_rack_signal_chain();

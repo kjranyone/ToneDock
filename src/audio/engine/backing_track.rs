@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use symphonia::core::audio::Signal;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
@@ -366,7 +367,7 @@ impl AudioEngine {
                     recording: true,
                     has_data: false,
                 });
-            *node.recorder_buffer.lock() = Some(vec![Vec::new(); channels]);
+            node.buffers.get_mut().recorder_buffer = Some(vec![Vec::new(); channels]);
         }
         let _ = commit_and_publish_graph(&self.graph, staging, None);
     }
@@ -377,10 +378,13 @@ impl AudioEngine {
         drop(guard);
         if let Some(node) = staging.get_node_mut(node_id) {
             let has_data = node
+                .buffers
+                .get_mut()
                 .recorder_buffer
-                .lock()
                 .as_ref()
-                .map_or(false, |b| b.iter().any(|c| !c.is_empty()));
+                .map_or(false, |b: &Vec<Vec<f32>>| {
+                    b.iter().any(|c: &Vec<f32>| !c.is_empty())
+                });
             node.internal_state =
                 NodeInternalState::Recorder(crate::audio::node::RecorderNodeState {
                     recording: false,
@@ -399,8 +403,8 @@ impl AudioEngine {
         let Some(node) = guard.get_node(node_id) else {
             return Err(anyhow::anyhow!("Recorder node not found"));
         };
-        let buf = node.recorder_buffer.lock();
-        let Some(ref data) = *buf else {
+        let buf = node.buffers();
+        let Some(ref data) = buf.recorder_buffer else {
             return Err(anyhow::anyhow!("No recorded data"));
         };
         if data.is_empty() || data[0].is_empty() {
@@ -417,12 +421,15 @@ impl AudioEngine {
         let mut writer = hound::WavWriter::create(path, spec)?;
         for i in 0..sample_count as usize {
             for ch in 0..channels as usize {
-                let sample = data.get(ch).and_then(|c| c.get(i)).copied().unwrap_or(0.0);
+                let sample = data
+                    .get(ch)
+                    .and_then(|c: &Vec<f32>| c.get(i))
+                    .copied()
+                    .unwrap_or(0.0);
                 writer.write_sample(sample)?;
             }
         }
         writer.finalize()?;
-        drop(buf);
         drop(guard);
         Ok(())
     }
@@ -431,10 +438,7 @@ impl AudioEngine {
     pub fn recorder_has_data(&self, node_id: NodeId) -> bool {
         let guard = self.graph.load();
         guard.get_node(node_id).map_or(false, |node| {
-            node.recorder_buffer
-                .lock()
-                .as_ref()
-                .map_or(false, |b| b.iter().any(|c| !c.is_empty()))
+            node.atomic_recorder_has_data.load(Ordering::Relaxed)
         })
     }
 

@@ -7,11 +7,11 @@ use crate::vst_host::editor::PluginEditor;
 
 impl ToneDockApp {
     pub(crate) fn open_rack_editor(&mut self, node_id: NodeId) {
-        if self.inline_rack_plugin_gui {
-            if self.inline_rack_editor_node != Some(node_id) {
+        if self.rack.inline_gui {
+            if self.rack.inline_editor_node != Some(node_id) {
                 self.close_all_rack_editors();
             }
-            self.inline_rack_editor_node = Some(node_id);
+            self.rack.inline_editor_node = Some(node_id);
             return;
         }
 
@@ -34,7 +34,8 @@ impl ToneDockApp {
 
         if let Some(edit_controller) = edit_controller {
             let editor = self
-                .rack_plugin_editors
+                .rack
+                .plugin_editors
                 .entry(node_id)
                 .or_insert_with(PluginEditor::new);
             match editor.open_separate_window(
@@ -58,7 +59,7 @@ impl ToneDockApp {
     }
 
     pub(crate) fn ensure_inline_rack_editor(&mut self, ui: &Ui, node_id: NodeId, rect: Rect) {
-        if !self.inline_rack_plugin_gui {
+        if !self.rack.inline_gui {
             return;
         }
 
@@ -96,7 +97,8 @@ impl ToneDockApp {
         );
 
         let editor = self
-            .rack_plugin_editors
+            .rack
+            .plugin_editors
             .entry(node_id)
             .or_insert_with(PluginEditor::new);
 
@@ -113,7 +115,7 @@ impl ToneDockApp {
                 plugin_name,
                 embed_err
             );
-            self.inline_rack_editor_node = None;
+            self.rack.inline_editor_node = None;
             match editor.open_separate_window(
                 &edit_controller,
                 &plugin_name,
@@ -182,8 +184,9 @@ impl ToneDockApp {
                         let available = self.available_plugins.clone();
                         let rack_slots = self.build_rack_slots();
                         let inline_node = self
-                            .inline_rack_editor_node
-                            .filter(|node_id| self.rack_order.contains(node_id));
+                            .rack
+                            .inline_editor_node
+                            .filter(|node_id| self.rack.order.contains(node_id));
                         let (commands, inline_rects) = self.rack_view.show(
                             ui,
                             &rack_slots,
@@ -226,7 +229,7 @@ impl ToneDockApp {
                                 }
                                 crate::ui::rack_view::RackCommand::Remove(node_id) => {
                                     self.remove_rack_plugin_from_graph(node_id);
-                                    if self.selected_rack_node == Some(node_id) {
+                                    if self.rack.selected_node == Some(node_id) {
                                         self.select_rack_plugin_node(None);
                                     }
                                 }
@@ -293,8 +296,12 @@ impl ToneDockApp {
                         ui.add_space(8.0);
 
                         let (out_l, out_r) = (
-                            f32::from_bits(self.audio_engine.output_level_l.load(Ordering::Relaxed)),
-                            f32::from_bits(self.audio_engine.output_level_r.load(Ordering::Relaxed)),
+                            f32::from_bits(
+                                self.audio_engine.output_level_l.load(Ordering::Relaxed),
+                            ),
+                            f32::from_bits(
+                                self.audio_engine.output_level_r.load(Ordering::Relaxed),
+                            ),
                         );
                         crate::ui::meters::draw_stereo_meter(
                             ui,
@@ -307,7 +314,8 @@ impl ToneDockApp {
 
                         ui.add_space(6.0);
 
-                        let in_l = f32::from_bits(self.audio_engine.input_level_l.load(Ordering::Relaxed));
+                        let in_l =
+                            f32::from_bits(self.audio_engine.input_level_l.load(Ordering::Relaxed));
                         crate::ui::meters::draw_mono_meter(
                             ui,
                             self.i18n.tr("rack.mono_input"),
@@ -318,7 +326,7 @@ impl ToneDockApp {
 
                         ui.add_space(10.0);
 
-                        let selected_node = self.selected_rack_node.or_else(|| {
+                        let selected_node = self.rack.selected_node.or_else(|| {
                             (self.audio_engine.chain_node_ids.len() == 1)
                                 .then(|| self.audio_engine.chain_node_ids[0])
                         });
@@ -438,8 +446,12 @@ impl ToneDockApp {
                         ui.add_space(8.0);
 
                         let (out_l, out_r) = (
-                            f32::from_bits(self.audio_engine.output_level_l.load(Ordering::Relaxed)),
-                            f32::from_bits(self.audio_engine.output_level_r.load(Ordering::Relaxed)),
+                            f32::from_bits(
+                                self.audio_engine.output_level_l.load(Ordering::Relaxed),
+                            ),
+                            f32::from_bits(
+                                self.audio_engine.output_level_r.load(Ordering::Relaxed),
+                            ),
                         );
                         crate::ui::meters::draw_stereo_meter(
                             ui,
@@ -450,7 +462,8 @@ impl ToneDockApp {
                             48.0,
                         );
                         ui.add_space(4.0);
-                        let in_l = f32::from_bits(self.audio_engine.input_level_l.load(Ordering::Relaxed));
+                        let in_l =
+                            f32::from_bits(self.audio_engine.input_level_l.load(Ordering::Relaxed));
                         crate::ui::meters::draw_mono_meter(
                             ui,
                             self.i18n.tr("rack.mono_input"),

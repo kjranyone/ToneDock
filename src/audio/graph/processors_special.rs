@@ -1,3 +1,7 @@
+const RECORDER_MAX_SECS: f64 = 1800.0;
+
+use std::sync::atomic::Ordering;
+
 use crate::audio::node::{NodeId, NodeInternalState};
 
 use super::AudioGraph;
@@ -52,37 +56,35 @@ impl AudioGraph {
         let accent_freq: f64 = 1500.0;
         let click_duration: usize = 480;
         let sample_rate = self.sample_rate;
-        let samples_per_beat = sample_rate * 60.0 / bpm;
+        let samples_per_beat = sample_rate * 60.0 / bpm.max(1.0);
 
         let node = self.nodes.get(&node_id).unwrap();
-        let mut output_buffers = node.output_buffers.lock();
-        let mut phase = node.metronome_phase.lock();
-        let mut click_remaining = node.metronome_click_remaining.lock();
+        let b = node.buffers_mut();
 
         let total_beats = if count_in_active && count_in_beats > 0 {
             count_in_beats
         } else {
             0
         };
-        let current_beat = (*phase / samples_per_beat).floor() as u32;
+        let current_beat = (b.metronome_phase / samples_per_beat).floor() as u32;
 
-        if let Some(out_buf) = output_buffers.get_mut(0) {
+        if let Some(out_buf) = b.output_buffers.get_mut(0) {
             if out_buf.is_empty() {
                 return;
             }
             let ch_count = out_buf.len();
 
             for frame in 0..num_frames {
-                let sample = if *click_remaining > 0 {
-                    let t = (click_duration - *click_remaining) as f64;
+                let sample = if b.metronome_click_remaining > 0 {
+                    let t = (click_duration - b.metronome_click_remaining) as f64;
                     let freq = if total_beats > 0 && current_beat == 0 {
                         accent_freq
                     } else {
                         click_freq
                     };
                     let val = (2.0 * std::f64::consts::PI * freq * t / sample_rate).sin()
-                        * (*click_remaining as f64 / click_duration as f64);
-                    *click_remaining -= 1;
+                        * (b.metronome_click_remaining as f64 / click_duration as f64);
+                    b.metronome_click_remaining -= 1;
                     val as f32 * volume
                 } else {
                     0.0
@@ -94,46 +96,64 @@ impl AudioGraph {
                     }
                 }
 
-                *phase += 1.0;
-                if *phase >= samples_per_beat {
-                    *phase -= samples_per_beat;
-                    *click_remaining = click_duration;
+                b.metronome_phase += 1.0;
+                if b.metronome_phase >= samples_per_beat {
+                    b.metronome_phase -= samples_per_beat;
+                    b.metronome_click_remaining = click_duration;
                 }
             }
         }
     }
 
     pub(super) fn process_looper_node(&self, node_id: NodeId, num_frames: usize) {
-        let (state, active_track): (crate::audio::node::LooperNodeState, u8) = {
+        let (recording, playing, overdubbing, enabled, active_track, fixed_length_beats): (
+            bool,
+            bool,
+            bool,
+            bool,
+            u8,
+            Option<u32>,
+        ) = {
             let node = self.nodes.get(&node_id).unwrap();
             match &node.internal_state {
-                NodeInternalState::Looper(s) => (s.clone(), s.active_track),
+                NodeInternalState::Looper(s) => (
+                    s.recording,
+                    s.playing,
+                    s.overdubbing,
+                    s.enabled,
+                    s.active_track,
+                    s.fixed_length_beats,
+                ),
                 _ => return,
             }
         };
 
-        if !state.enabled {
+        if !enabled {
             return;
         }
 
-        let fixed_length_samples = state.fixed_length_beats.and_then(|beats| {
-            let samples_per_beat = self.sample_rate * 60.0 / 120.0;
+        let bpm = self
+            .nodes
+            .values()
+            .find_map(|n| match &n.internal_state {
+                NodeInternalState::Metronome(s) => Some(s.bpm),
+                _ => None,
+            })
+            .unwrap_or(120.0)
+            .max(1.0);
+
+        let fixed_length_samples = fixed_length_beats.and_then(|beats| {
+            let samples_per_beat = self.sample_rate * 60.0 / bpm;
             Some((beats as f64 * samples_per_beat) as usize)
         });
 
-        let input_data: Option<Vec<Vec<f32>>> = {
-            let node = self.nodes.get(&node_id).unwrap();
-            let input_buffers = node.input_buffers.lock();
-            input_buffers.get(0).and_then(|opt| opt.clone())
-        };
-
         let node = self.nodes.get(&node_id).unwrap();
-        let mut output_buffers = node.output_buffers.lock();
+        let b = node.buffers_mut();
 
-        if state.recording {
-            if let Some(ref input_buf) = input_data {
-                let mut looper = node.looper_buffer.lock();
-                if let Some(ref mut bufs) = *looper {
+        if recording {
+            let input_ref = b.input_buffers.get(0).and_then(|opt| opt.as_ref());
+            if let Some(ref input_buf) = input_ref {
+                if let Some(ref mut bufs) = b.looper_buffer {
                     if let Some(buf) = bufs.get_mut(active_track as usize) {
                         buf.record(input_buf, num_frames);
                         if let Some(max_samples) = fixed_length_samples {
@@ -146,40 +166,42 @@ impl AudioGraph {
             }
         }
 
-        if state.playing {
-            let mut looper = node.looper_buffer.lock();
-            if let Some(ref mut bufs) = *looper {
+        if playing {
+            if let Some(ref mut bufs) = b.looper_buffer {
                 if let Some(buf) = bufs.get_mut(active_track as usize) {
-                    if let Some(out_buf) = output_buffers.get_mut(0) {
-                        let ch_count = out_buf.len();
-                        let mut temp_out = vec![vec![0.0f32; num_frames]; ch_count];
-                        buf.read_and_advance(&mut temp_out, num_frames);
-                        for ch in 0..ch_count {
-                            let len = num_frames.min(out_buf[ch].len()).min(temp_out[ch].len());
-                            for i in 0..len {
-                                out_buf[ch][i] += temp_out[ch][i];
-                            }
-                        }
+                    if let Some(out_buf) = b.output_buffers.get_mut(0) {
+                        buf.read_and_advance(out_buf, num_frames);
                     }
                 }
             }
-        } else if let Some(ref input_buf) = input_data {
-            if let Some(out_buf) = output_buffers.get_mut(0) {
-                let ch_count = input_buf.len().min(out_buf.len());
-                for ch in 0..ch_count {
-                    let len = num_frames.min(input_buf[ch].len()).min(out_buf[ch].len());
-                    out_buf[ch][..len].copy_from_slice(&input_buf[ch][..len]);
+        } else {
+            let input_ref = b.input_buffers.get(0).and_then(|opt| opt.as_ref());
+            if let Some(ref input_buf) = input_ref {
+                if let Some(out_buf) = b.output_buffers.get_mut(0) {
+                    let ch_count = input_buf.len().min(out_buf.len());
+                    for ch in 0..ch_count {
+                        let len = num_frames.min(input_buf[ch].len()).min(out_buf[ch].len());
+                        out_buf[ch][..len].copy_from_slice(&input_buf[ch][..len]);
+                    }
                 }
             }
         }
 
-        if state.overdubbing {
-            if let Some(ref input_buf) = input_data {
-                let mut looper = node.looper_buffer.lock();
-                if let Some(ref mut bufs) = *looper {
+        if overdubbing {
+            let input_ref = b.input_buffers.get(0).and_then(|opt| opt.as_ref());
+            if let Some(ref input_buf) = input_ref {
+                if let Some(ref mut bufs) = b.looper_buffer {
                     if let Some(buf) = bufs.get_mut(active_track as usize) {
                         buf.overdub(input_buf, num_frames);
                     }
+                }
+            }
+        }
+
+        if let Some(ref bufs) = b.looper_buffer {
+            for (i, buf) in bufs.iter().enumerate() {
+                if i < 4 {
+                    node.atomic_looper_lengths[i].store(buf.len, Ordering::Relaxed);
                 }
             }
         }
@@ -208,10 +230,9 @@ impl AudioGraph {
         }
 
         let node = self.nodes.get(&node_id).unwrap();
-        let mut output_buffers = node.output_buffers.lock();
-        let mut bt_buf = node.backing_track_buffer.lock();
+        let b = node.buffers_mut();
 
-        let Some(ref mut buf) = *bt_buf else {
+        let Some(ref mut buf) = b.backing_track_buffer else {
             return;
         };
         if buf.total_frames == 0 {
@@ -220,27 +241,29 @@ impl AudioGraph {
 
         let pre_roll_frames = (pre_roll_secs * self.sample_rate) as usize;
         if pre_roll_frames > 0 {
-            let node = self.nodes.get(&node_id).unwrap();
-            let mut pr = node.backing_pre_roll_remaining.lock();
-            if *pr == 0 {
-                *pr = pre_roll_frames;
+            if b.backing_pre_roll_remaining.is_none() {
+                b.backing_pre_roll_remaining = Some(pre_roll_frames);
             }
-            if *pr > 0 {
-                let silent = num_frames.min(*pr);
-                *pr -= silent;
-                drop(pr);
-                if let Some(out_buf) = output_buffers.get_mut(0) {
-                    for ch in out_buf.iter_mut() {
-                        for f in ch.iter_mut().take(silent) {
-                            *f = 0.0;
+            if let Some(ref mut remaining) = b.backing_pre_roll_remaining {
+                if *remaining > 0 {
+                    let silent = num_frames.min(*remaining);
+                    *remaining -= silent;
+                    if let Some(out_buf) = b.output_buffers.get_mut(0) {
+                        for ch in out_buf.iter_mut() {
+                            for f in ch.iter_mut().take(silent) {
+                                *f = 0.0;
+                            }
                         }
                     }
+                    if *remaining == 0 {
+                        *remaining = 0;
+                    }
+                    return;
                 }
-                return;
             }
         }
 
-        let Some(out_buf) = output_buffers.get_mut(0) else {
+        let Some(out_buf) = b.output_buffers.get_mut(0) else {
             return;
         };
 
@@ -261,37 +284,42 @@ impl AudioGraph {
         for frame in 0..num_frames {
             let pos = buf.playback_pos;
             let pos_floor = pos.floor() as usize;
-            let frac = (pos - pos_floor as f64) as f32;
 
-            if let (Some(start), Some(end)) = (ab_start, ab_end) {
+            let done = if let (Some(start), Some(end)) = (ab_start, ab_end) {
                 if end > start && pos_floor >= end {
                     if looping {
                         buf.playback_pos = start as f64 + (pos - end as f64);
-                        continue;
+                        false
                     } else {
-                        for ch in 0..out_ch {
-                            for f in &mut out_buf[ch][frame..num_frames] {
-                                *f = 0.0;
-                            }
-                        }
-                        break;
+                        true
                     }
+                } else {
+                    false
                 }
             } else if pos_floor >= buf.total_frames {
                 if looping {
                     buf.playback_pos = pos - buf.total_frames as f64;
-                    continue;
+                    false
                 } else {
-                    for ch in 0..out_ch {
-                        for f in &mut out_buf[ch][frame..num_frames] {
-                            *f = 0.0;
-                        }
-                    }
-                    break;
+                    true
                 }
+            } else {
+                false
+            };
+
+            if done {
+                for ch in 0..out_ch {
+                    for f in &mut out_buf[ch][frame..num_frames] {
+                        *f = 0.0;
+                    }
+                }
+                break;
             }
 
-            // Cubic Hermite Interpolation (4-point)
+            let pos = buf.playback_pos;
+            let pos_floor = pos.floor() as usize;
+            let frac = (pos - pos_floor as f64) as f32;
+
             let s1 = pos_floor;
             let (range_start, range_end) = if let (Some(s), Some(e)) = (ab_start, ab_end) {
                 (s, e)
@@ -321,46 +349,44 @@ impl AudioGraph {
                 s2
             };
 
-            for ch in 0..out_ch.min(src_ch) {
-                let data = &buf.data[ch];
-                let v0 = data.get(s0).copied().unwrap_or(0.0);
-                let v1 = data.get(s1).copied().unwrap_or(0.0);
-                let v2 = data.get(s2).copied().unwrap_or(0.0);
-                let v3 = data.get(s3).copied().unwrap_or(0.0);
-
-                let sample = cubic_interp(v0, v1, v2, v3, frac) * volume;
-                if frame < out_buf[ch].len() {
-                    out_buf[ch][frame] += sample;
-                }
-            }
-
             if src_ch == 1 && out_ch >= 2 {
                 let data = &buf.data[0];
-                let v0 = data.get(s0).copied().unwrap_or(0.0);
-                let v1 = data.get(s1).copied().unwrap_or(0.0);
-                let v2 = data.get(s2).copied().unwrap_or(0.0);
-                let v3 = data.get(s3).copied().unwrap_or(0.0);
-
+                let total = buf.total_frames;
+                let v0 = if s0 < total { data[s0] } else { 0.0 };
+                let v1 = if s1 < total { data[s1] } else { 0.0 };
+                let v2 = if s2 < total { data[s2] } else { 0.0 };
+                let v3 = if s3 < total { data[s3] } else { 0.0 };
                 let sample = cubic_interp(v0, v1, v2, v3, frac) * volume;
-                if frame < out_buf[1].len() {
-                    out_buf[1][frame] += sample;
+                out_buf[0][frame] += sample;
+                out_buf[1][frame] += sample;
+            } else {
+                for ch in 0..out_ch.min(src_ch) {
+                    let data = &buf.data[ch];
+                    let total = buf.total_frames;
+                    let v0 = if s0 < total { data[s0] } else { 0.0 };
+                    let v1 = if s1 < total { data[s1] } else { 0.0 };
+                    let v2 = if s2 < total { data[s2] } else { 0.0 };
+                    let v3 = if s3 < total { data[s3] } else { 0.0 };
+                    let sample = cubic_interp(v0, v1, v2, v3, frac) * volume;
+                    out_buf[ch][frame] += sample;
                 }
             }
 
             buf.playback_pos += ratio;
         }
+
+        let pos_secs = if buf.sample_rate > 0.0 {
+            buf.playback_pos / buf.sample_rate
+        } else {
+            0.0
+        };
+        node.atomic_bt_position
+            .store(pos_secs.to_bits(), Ordering::Relaxed);
+        node.atomic_bt_duration
+            .store(buf.duration_secs().to_bits(), Ordering::Relaxed);
     }
 
     pub(super) fn process_vst_node(&self, node_id: NodeId, num_frames: usize) {
-        let input_data: Vec<Vec<f32>> = {
-            let node = self.nodes.get(&node_id).unwrap();
-            let input_buffers = node.input_buffers.lock();
-            input_buffers
-                .get(0)
-                .and_then(|opt| opt.clone())
-                .unwrap_or_default()
-        };
-
         let num_ch = {
             let node = self.nodes.get(&node_id).unwrap();
             node.output_ports
@@ -373,48 +399,45 @@ impl AudioGraph {
             return;
         }
 
-        let has_plugin = {
-            let node = self.nodes.get(&node_id).unwrap();
-            node.plugin_instance.lock().is_some()
-        };
+        let node = self.nodes.get(&node_id).unwrap();
+        let b = node.buffers_mut();
+
+        let input_data = b.input_buffers.get(0).and_then(|opt| opt.as_ref());
+
+        let mut plugin_guard = node.plugin_instance.try_lock();
+        let has_plugin = plugin_guard.as_ref().map_or(false, |g| g.is_some());
 
         if has_plugin {
-            let mut temp_io: Vec<Vec<f32>> = vec![vec![0.0f32; num_frames]; num_ch];
-            let ch_count = input_data.len().min(num_ch);
-            for ch in 0..ch_count {
-                let copy_len = num_frames.min(input_data[ch].len()).min(temp_io[ch].len());
-                temp_io[ch][..copy_len].copy_from_slice(&input_data[ch][..copy_len]);
-            }
-
-            {
-                let node = self.nodes.get(&node_id).unwrap();
-                let mut plugin_instance = node.plugin_instance.lock();
-                if let Some(ref mut plugin) = *plugin_instance {
-                    let mut slices: Vec<&mut [f32]> =
-                        temp_io.iter_mut().map(|v| &mut v[..]).collect();
-                    plugin.process_in_place(&mut slices, num_frames as i32);
-                }
-            }
-
-            let node = self.nodes.get(&node_id).unwrap();
-            let mut output_buffers = node.output_buffers.lock();
-            if let Some(out_buf) = output_buffers.get_mut(0) {
-                let out_ch = out_buf.len().min(num_ch);
-                for ch in 0..out_ch {
-                    let len = num_frames.min(temp_io[ch].len()).min(out_buf[ch].len());
-                    out_buf[ch][..len].copy_from_slice(&temp_io[ch][..len]);
+            if let Some(ref mut plugin) = **plugin_guard.as_mut().unwrap() {
+                if let Some(out_buf) = b.output_buffers.get_mut(0) {
+                    for ch in out_buf.iter_mut() {
+                        let len = num_frames.min(ch.len());
+                        ch[..len].fill(0.0);
+                    }
+                    if let Some(ref input_buf) = input_data {
+                        let ch_count = input_buf.len().min(num_ch).min(out_buf.len());
+                        for ch in 0..ch_count {
+                            let copy_len =
+                                num_frames.min(input_buf[ch].len()).min(out_buf[ch].len());
+                            out_buf[ch][..copy_len].copy_from_slice(&input_buf[ch][..copy_len]);
+                        }
+                    }
+                    let (first, second) = out_buf.split_at_mut(1);
+                    let mut slices: [&mut [f32]; 2] = [&mut first[0][..], &mut second[0][..]];
+                    plugin.process_in_place(&mut slices[..num_ch.min(2)], num_frames as i32);
                 }
             }
         } else {
-            let node = self.nodes.get(&node_id).unwrap();
-            let mut output_buffers = node.output_buffers.lock();
-            if let Some(out_buf) = output_buffers.get_mut(0) {
-                let out_ch = out_buf.len();
-                let in_ch = input_data.len();
-                let ch_count = in_ch.min(out_ch);
-                for ch in 0..ch_count {
-                    let len = num_frames.min(input_data[ch].len()).min(out_buf[ch].len());
-                    out_buf[ch][..len].copy_from_slice(&input_data[ch][..len]);
+            drop(plugin_guard);
+            if let Some(out_buf) = b.output_buffers.get_mut(0) {
+                if let Some(ref input_buf) = input_data {
+                    let out_ch = out_buf.len();
+                    let in_ch = input_buf.len();
+                    let ch_count = in_ch.min(out_ch);
+                    for ch in 0..ch_count {
+                        let len = num_frames.min(input_buf[ch].len()).min(out_buf[ch].len());
+                        out_buf[ch][..len].copy_from_slice(&input_buf[ch][..len]);
+                    }
                 }
             }
         }
@@ -436,22 +459,20 @@ impl AudioGraph {
         }
 
         let node = self.nodes.get(&node_id).unwrap();
-        let mut output_buffers = node.output_buffers.lock();
-        let mut phase = node.drum_phase.lock();
-        let mut step = node.drum_step.lock();
+        let b = node.buffers_mut();
         let sample_rate = self.sample_rate;
-        let samples_per_step = sample_rate * 60.0 / bpm / 4.0;
+        let samples_per_step = sample_rate * 60.0 / bpm.max(1.0) / 4.0;
         let pattern = drum_pattern(pattern_idx);
 
-        let Some(out_buf) = output_buffers.get_mut(0) else {
+        let Some(out_buf) = b.output_buffers.get_mut(0) else {
             return;
         };
         let out_ch = out_buf.len();
 
         for frame in 0..num_frames {
-            let current_step = *step % DRUM_STEPS;
+            let current_step = b.drum_step % DRUM_STEPS;
             let hit = pattern[current_step as usize];
-            let step_phase = *phase;
+            let step_phase = b.drum_phase;
             let step_sample = step_phase as usize;
 
             let mut sample_l = 0.0f32;
@@ -494,10 +515,10 @@ impl AudioGraph {
                 out_buf[1][frame] += out_sample_r;
             }
 
-            *phase += 1.0;
-            if *phase >= samples_per_step {
-                *phase -= samples_per_step;
-                *step = (*step + 1) % DRUM_STEPS;
+            b.drum_phase += 1.0;
+            if b.drum_phase >= samples_per_step {
+                b.drum_phase -= samples_per_step;
+                b.drum_step = (b.drum_step + 1) % DRUM_STEPS;
             }
         }
     }
@@ -515,22 +536,27 @@ impl AudioGraph {
             return;
         }
 
-        let input_data: Option<Vec<Vec<f32>>> = {
-            let node = self.nodes.get(&node_id).unwrap();
-            let input_buffers = node.input_buffers.lock();
-            input_buffers.first().and_then(|opt| opt.clone())
-        };
-
         let node = self.nodes.get(&node_id).unwrap();
-        let mut buf = node.recorder_buffer.lock();
-        if let Some(ref mut recorder) = *buf {
+        let b = node.buffers_mut();
+        let input_data = b.input_buffers.first().and_then(|opt| opt.as_ref());
+
+        if let Some(ref mut recorder) = b.recorder_buffer {
             if let Some(ref input) = input_data {
+                let max_samples = (self.sample_rate * RECORDER_MAX_SECS) as usize;
                 let ch_count = recorder.len().min(input.len());
                 for ch in 0..ch_count {
-                    let len = num_frames.min(input[ch].len());
+                    let room = max_samples.saturating_sub(recorder[ch].len());
+                    let len = num_frames.min(input[ch].len()).min(room);
                     recorder[ch].extend_from_slice(&input[ch][..len]);
                 }
             }
         }
+
+        let has_data = b
+            .recorder_buffer
+            .as_ref()
+            .map_or(false, |buf| buf.iter().any(|c| !c.is_empty()));
+        node.atomic_recorder_has_data
+            .store(has_data, Ordering::Relaxed);
     }
 }

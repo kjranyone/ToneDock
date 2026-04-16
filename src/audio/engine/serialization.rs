@@ -154,8 +154,8 @@ impl AudioEngine {
                 &sn.parameters,
             ) {
                 Ok(plugin) => {
-                    if let Some(node) = new_graph.get_node(sn.id) {
-                        *node.plugin_instance.lock() = Some(plugin);
+                    if let Some(node) = new_graph.get_node_mut(sn.id) {
+                        *node.plugin_instance.get_mut() = Some(plugin);
                     }
                 }
                 Err(err) => {
@@ -173,6 +173,11 @@ impl AudioEngine {
         let looper_node_id = Self::find_node_id_in_graph(&new_graph, NodeType::Looper);
         self.metronome_node_id = metronome_node_id;
         self.looper_node_id = looper_node_id;
+
+        let guard = self.graph.load();
+        super::helpers::transfer_runtime_buffers(&guard, &new_graph);
+        drop(guard);
+
         self.graph.store(Arc::new(new_graph));
         log::info!(
             "Loaded serialized graph: {} nodes, {} connections",
@@ -189,6 +194,9 @@ impl AudioEngine {
     ) -> anyhow::Result<()> {
         let plugin = self.instantiate_serialized_plugin(info, None, &[])?;
 
+        // Safe: plugin_instance is Mutex-protected. The audio thread holds the lock during
+        // process(), so this blocks until processing is done. The swap is atomic from the
+        // audio thread's perspective (it sees either old or new plugin, never both).
         {
             let guard = self.graph.load();
             if let Some(node) = guard.get_node(node_id) {

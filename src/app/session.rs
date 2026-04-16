@@ -1,8 +1,8 @@
 use super::autosave_path;
 use super::ToneDockApp;
-use std::sync::atomic::Ordering;
 use crate::audio::node::{NodeId, NodeInternalState, NodeType};
 use crate::session::{Preset, Session, TransportState};
+use std::sync::atomic::Ordering;
 
 impl ToneDockApp {
     pub(crate) fn save_preset(&mut self) {
@@ -66,7 +66,7 @@ impl ToneDockApp {
 
             self.close_all_rack_editors();
             self.audio_engine.chain_node_ids.clear();
-            self.rack_order = preset.rack_order.clone();
+            self.rack.order = preset.rack_order.clone();
             self.select_rack_plugin_node(None);
             self.preset_name = preset.name.clone();
             self.sync_transport_state_from_graph();
@@ -125,7 +125,7 @@ impl ToneDockApp {
                     }
                     self.close_all_rack_editors();
                     self.audio_engine.chain_node_ids.clear();
-                    self.rack_order = session.preset.rack_order.clone();
+                    self.rack.order = session.preset.rack_order.clone();
                     self.select_rack_plugin_node(None);
                     self.preset_name = session.preset.name;
                     self.sync_transport_state_from_graph();
@@ -170,7 +170,7 @@ impl ToneDockApp {
                 }
                 self.close_all_rack_editors();
                 self.audio_engine.chain_node_ids.clear();
-                self.rack_order = preset.rack_order.clone();
+                self.rack.order = preset.rack_order.clone();
                 self.select_rack_plugin_node(None);
                 self.preset_name = preset.name.clone();
                 self.sync_transport_state_from_graph();
@@ -219,17 +219,17 @@ impl ToneDockApp {
         Preset {
             name: preset_name,
             graph: self.audio_engine.snapshot_serialized_graph(),
-            rack_order: self.rack_order.clone(),
+            rack_order: self.rack.order.clone(),
             transport: TransportState {
-                metronome_bpm: Some(self.metronome_bpm),
-                metronome_volume: Some(self.metronome_volume),
-                metronome_enabled: Some(self.metronome_enabled),
-                backing_track_volume: Some(self.backing_track_volume),
-                backing_track_speed: Some(self.backing_track_speed),
-                backing_track_looping: Some(self.backing_track_looping),
-                backing_track_pitch_semitones: Some(self.backing_track_pitch_semitones),
-                backing_track_pre_roll_secs: Some(self.backing_track_pre_roll_secs),
-                looper_pre_fader: Some(self.looper_pre_fader),
+                metronome_bpm: Some(self.transport.metronome_bpm),
+                metronome_volume: Some(self.transport.metronome_volume),
+                metronome_enabled: Some(self.transport.metronome_enabled),
+                backing_track_volume: Some(self.transport.backing_track_volume),
+                backing_track_speed: Some(self.transport.backing_track_speed),
+                backing_track_looping: Some(self.transport.backing_track_looping),
+                backing_track_pitch_semitones: Some(self.transport.backing_track_pitch_semitones),
+                backing_track_pre_roll_secs: Some(self.transport.backing_track_pre_roll_secs),
+                looper_pre_fader: Some(self.transport.looper_pre_fader),
                 master_volume: Some(self.master_volume),
                 input_gain: Some(self.input_gain),
                 audio_host_id: self.audio_engine.host_id.map(|id| format!("{:?}", id)),
@@ -261,7 +261,7 @@ impl ToneDockApp {
 
                     self.close_all_rack_editors();
                     self.audio_engine.chain_node_ids.clear();
-                    self.rack_order = session.preset.rack_order.clone();
+                    self.rack.order = session.preset.rack_order.clone();
                     self.select_rack_plugin_node(None);
                     self.preset_name = session.preset.name;
                     self.sync_transport_state_from_graph();
@@ -283,16 +283,29 @@ impl ToneDockApp {
     }
 
     pub(crate) fn sync_transport_state_from_graph(&mut self) {
-        self.metronome_enabled = false;
-        self.metronome_bpm = 120.0;
-        self.metronome_volume = 0.5;
-        self.metronome_node_id = None;
+        self.transport.metronome_enabled = false;
+        self.transport.metronome_bpm = 120.0;
+        self.transport.metronome_volume = 0.5;
+        self.transport.metronome_node_id = None;
 
-        self.looper_enabled = false;
-        self.looper_recording = false;
-        self.looper_playing = false;
-        self.looper_overdubbing = false;
-        self.looper_node_id = None;
+        self.transport.looper_enabled = false;
+        self.transport.looper_recording = false;
+        self.transport.looper_playing = false;
+        self.transport.looper_overdubbing = false;
+        self.transport.looper_node_id = None;
+
+        self.transport.backing_track_node_id = None;
+        self.transport.backing_track_playing = false;
+        self.transport.backing_track_volume = 0.8;
+        self.transport.backing_track_speed = 1.0;
+        self.transport.backing_track_looping = true;
+        self.transport.backing_track_pitch_semitones = 0.0;
+        self.transport.backing_track_pre_roll_secs = 0.0;
+        self.transport.backing_track_file_name = None;
+        self.transport.backing_track_duration = 0.0;
+        self.transport.backing_track_section_markers = Vec::new();
+
+        self.transport.drum_machine_node_id = None;
 
         let guard = self.audio_engine.graph.load();
         let mut node_ids: Vec<NodeId> = guard.nodes().keys().copied().collect();
@@ -305,22 +318,43 @@ impl ToneDockApp {
 
             match (&node.node_type, &node.internal_state) {
                 (NodeType::Metronome, NodeInternalState::Metronome(state)) => {
-                    self.metronome_node_id = Some(node_id);
-                    self.metronome_enabled = node.enabled;
-                    self.metronome_bpm = state.bpm;
-                    self.metronome_volume = state.volume;
+                    self.transport.metronome_node_id = Some(node_id);
+                    self.transport.metronome_enabled = node.enabled;
+                    self.transport.metronome_bpm = state.bpm;
+                    self.transport.metronome_volume = state.volume;
                 }
                 (NodeType::Looper, NodeInternalState::Looper(state)) => {
-                    self.looper_node_id = Some(node_id);
-                    self.looper_enabled = node.enabled && state.enabled;
-                    self.looper_recording = state.recording;
-                    self.looper_playing = state.playing;
-                    self.looper_overdubbing = state.overdubbing;
-                    self.looper_pre_fader = state.pre_fader;
+                    self.transport.looper_node_id = Some(node_id);
+                    self.transport.looper_enabled = node.enabled && state.enabled;
+                    self.transport.looper_recording = state.recording;
+                    self.transport.looper_playing = state.playing;
+                    self.transport.looper_overdubbing = state.overdubbing;
+                    self.transport.looper_pre_fader = state.pre_fader;
                 }
                 (NodeType::Looper, _) => {
-                    self.looper_node_id = Some(node_id);
-                    self.looper_enabled = node.enabled;
+                    self.transport.looper_node_id = Some(node_id);
+                    self.transport.looper_enabled = node.enabled;
+                }
+                (NodeType::BackingTrack, NodeInternalState::BackingTrack(state)) => {
+                    self.transport.backing_track_node_id = Some(node_id);
+                    self.transport.backing_track_playing = state.playing;
+                    self.transport.backing_track_volume = state.volume;
+                    self.transport.backing_track_speed = state.speed;
+                    self.transport.backing_track_looping = state.looping;
+                    self.transport.backing_track_pitch_semitones = state.pitch_semitones;
+                    self.transport.backing_track_pre_roll_secs = state.pre_roll_secs;
+                    self.transport.backing_track_section_markers = state.section_markers.clone();
+                    self.transport.backing_track_duration =
+                        f64::from_bits(node.atomic_bt_duration.load(Ordering::Relaxed));
+                }
+                (NodeType::BackingTrack, _) => {
+                    self.transport.backing_track_node_id = Some(node_id);
+                }
+                (NodeType::DrumMachine, _) => {
+                    self.transport.drum_machine_node_id = Some(node_id);
+                }
+                (NodeType::Recorder, _) => {
+                    self.transport.recorder_node_id = Some(node_id);
                 }
                 _ => {}
             }
@@ -329,40 +363,44 @@ impl ToneDockApp {
 
     pub(crate) fn apply_transport_state(&mut self, transport: &TransportState) {
         if let Some(bpm) = transport.metronome_bpm {
-            self.metronome_bpm = bpm;
+            self.transport.metronome_bpm = bpm;
         }
         if let Some(vol) = transport.metronome_volume {
-            self.metronome_volume = vol;
+            self.transport.metronome_volume = vol;
         }
         if let Some(enabled) = transport.metronome_enabled {
-            self.metronome_enabled = enabled;
+            self.transport.metronome_enabled = enabled;
         }
         if let Some(vol) = transport.backing_track_volume {
-            self.backing_track_volume = vol;
+            self.transport.backing_track_volume = vol;
         }
         if let Some(speed) = transport.backing_track_speed {
-            self.backing_track_speed = speed;
+            self.transport.backing_track_speed = speed;
         }
         if let Some(looping) = transport.backing_track_looping {
-            self.backing_track_looping = looping;
+            self.transport.backing_track_looping = looping;
         }
         if let Some(pitch) = transport.backing_track_pitch_semitones {
-            self.backing_track_pitch_semitones = pitch;
+            self.transport.backing_track_pitch_semitones = pitch;
         }
         if let Some(pre_roll) = transport.backing_track_pre_roll_secs {
-            self.backing_track_pre_roll_secs = pre_roll;
+            self.transport.backing_track_pre_roll_secs = pre_roll;
         }
         if let Some(pre_fader) = transport.looper_pre_fader {
-            self.looper_pre_fader = pre_fader;
+            self.transport.looper_pre_fader = pre_fader;
         }
         if let Some(vol) = transport.master_volume {
             self.master_volume = vol;
-            self.audio_engine.master_volume.store(vol.to_bits(), Ordering::Relaxed);
+            self.audio_engine
+                .master_volume
+                .store(vol.to_bits(), Ordering::Relaxed);
         }
 
         if let Some(gain) = transport.input_gain {
             self.input_gain = gain;
-            self.audio_engine.input_gain.store(gain.to_bits(), Ordering::Relaxed);
+            self.audio_engine
+                .input_gain
+                .store(gain.to_bits(), Ordering::Relaxed);
         }
 
         if transport.output_device.is_some()
@@ -405,7 +443,7 @@ impl ToneDockApp {
             self.custom_plugin_paths.clone(),
             self.audio_engine.input_channel,
             self.audio_engine.output_channels,
-            self.inline_rack_plugin_gui,
+            self.rack.inline_gui,
         ));
     }
 
@@ -452,7 +490,7 @@ impl ToneDockApp {
         }
 
         self.audio_engine.chain_node_ids.clear();
-        self.rack_order = preset.rack_order.clone();
+        self.rack.order = preset.rack_order.clone();
         self.select_rack_plugin_node(None);
         self.preset_name = preset.name.clone();
         self.sync_transport_state_from_graph();

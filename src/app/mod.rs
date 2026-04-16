@@ -105,6 +105,78 @@ pub(super) enum ViewMode {
     NodeEditor,
 }
 
+pub(super) struct TransportState {
+    pub metronome_enabled: bool,
+    pub metronome_bpm: f64,
+    pub metronome_volume: f32,
+    pub metronome_node_id: Option<NodeId>,
+    pub looper_enabled: bool,
+    pub looper_recording: bool,
+    pub looper_playing: bool,
+    pub looper_overdubbing: bool,
+    pub looper_pre_fader: bool,
+    pub looper_active_track: u8,
+    pub looper_node_id: Option<NodeId>,
+    pub backing_track_node_id: Option<NodeId>,
+    pub backing_track_playing: bool,
+    pub backing_track_volume: f32,
+    pub backing_track_speed: f32,
+    pub backing_track_pitch_semitones: f32,
+    pub backing_track_pre_roll_secs: f64,
+    pub backing_track_looping: bool,
+    pub backing_track_file_name: Option<String>,
+    pub backing_track_duration: f64,
+    pub backing_track_section_markers: Vec<f64>,
+    pub recorder_node_id: Option<NodeId>,
+    pub drum_machine_node_id: Option<NodeId>,
+}
+
+impl Default for TransportState {
+    fn default() -> Self {
+        Self {
+            metronome_enabled: false,
+            metronome_bpm: 120.0,
+            metronome_volume: 0.5,
+            metronome_node_id: None,
+            looper_enabled: false,
+            looper_recording: false,
+            looper_playing: false,
+            looper_overdubbing: false,
+            looper_pre_fader: false,
+            looper_active_track: 0,
+            looper_node_id: None,
+            backing_track_node_id: None,
+            backing_track_playing: false,
+            backing_track_volume: 0.8,
+            backing_track_speed: 1.0,
+            backing_track_pitch_semitones: 0.0,
+            backing_track_pre_roll_secs: 0.0,
+            backing_track_looping: true,
+            backing_track_file_name: None,
+            backing_track_duration: 0.0,
+            backing_track_section_markers: Vec::new(),
+            recorder_node_id: None,
+            drum_machine_node_id: None,
+        }
+    }
+}
+
+pub(super) struct RackState {
+    pub selected_node: Option<NodeId>,
+    pub order: Vec<NodeId>,
+    pub plugin_editors: HashMap<NodeId, PluginEditor>,
+    pub inline_gui: bool,
+    pub inline_editor_node: Option<NodeId>,
+}
+
+pub(super) struct MidiState {
+    pub input: MidiInput,
+    pub map: MidiMap,
+    pub learning: bool,
+    pub learn_target: Option<MidiAction>,
+    pub tap_tempo_times: Vec<std::time::Instant>,
+}
+
 pub struct ToneDockApp {
     i18n: I18n,
     audio_engine: AudioEngine,
@@ -116,41 +188,13 @@ pub struct ToneDockApp {
     preset_name: String,
     undo_manager: UndoManager,
 
-    metronome_enabled: bool,
-    metronome_bpm: f64,
-    metronome_volume: f32,
-    metronome_node_id: Option<NodeId>,
-
-    looper_enabled: bool,
-    looper_recording: bool,
-    looper_playing: bool,
-    looper_overdubbing: bool,
-    looper_pre_fader: bool,
-    looper_active_track: u8,
-    looper_node_id: Option<NodeId>,
-
-    backing_track_node_id: Option<NodeId>,
-    backing_track_playing: bool,
-    backing_track_volume: f32,
-    backing_track_speed: f32,
-    backing_track_pitch_semitones: f32,
-    backing_track_pre_roll_secs: f64,
-    backing_track_looping: bool,
-    backing_track_file_name: Option<String>,
-    backing_track_duration: f64,
-    backing_track_section_markers: Vec<f64>,
-    recorder_node_id: Option<NodeId>,
-
-    drum_machine_node_id: Option<NodeId>,
+    pub(super) transport: TransportState,
+    pub(super) rack: RackState,
+    pub(super) midi: MidiState,
 
     preset_a: Option<String>,
     preset_b: Option<String>,
 
-    selected_rack_node: Option<NodeId>,
-    rack_order: Vec<NodeId>,
-    rack_plugin_editors: HashMap<NodeId, PluginEditor>,
-    inline_rack_plugin_gui: bool,
-    inline_rack_editor_node: Option<NodeId>,
     show_about: bool,
     status_message: String,
 
@@ -162,12 +206,6 @@ pub struct ToneDockApp {
     main_hwnd: Option<std::ptr::NonNull<std::ffi::c_void>>,
     settings: AppSettings,
     settings_dirty: bool,
-
-    midi_input: MidiInput,
-    midi_map: MidiMap,
-    midi_learning: bool,
-    midi_learn_target: Option<MidiAction>,
-    tap_tempo_times: Vec<std::time::Instant>,
 
     fullscreen: bool,
     practice_timer_start: Option<std::time::Instant>,
@@ -216,36 +254,23 @@ impl ToneDockApp {
             custom_plugin_paths: settings.custom_plugin_paths.clone(),
             preset_name,
             undo_manager: UndoManager::new(),
-            metronome_enabled: false,
-            metronome_bpm: 120.0,
-            metronome_volume: 0.5,
-            metronome_node_id: None,
-            looper_enabled: false,
-            looper_recording: false,
-            looper_playing: false,
-            looper_overdubbing: false,
-            looper_pre_fader: false,
-            looper_active_track: 0,
-            looper_node_id: None,
-            backing_track_node_id: None,
-            backing_track_playing: false,
-            backing_track_volume: 0.8,
-            backing_track_speed: 1.0,
-            backing_track_pitch_semitones: 0.0,
-            backing_track_pre_roll_secs: 0.0,
-            backing_track_looping: true,
-            backing_track_file_name: None,
-            backing_track_duration: 0.0,
-            backing_track_section_markers: Vec::new(),
-            recorder_node_id: None,
-            drum_machine_node_id: None,
+            transport: TransportState::default(),
+            rack: RackState {
+                selected_node: None,
+                order: Vec::new(),
+                plugin_editors: HashMap::new(),
+                inline_gui: settings.inline_rack_plugin_gui,
+                inline_editor_node: None,
+            },
+            midi: MidiState {
+                input: MidiInput::new(),
+                map: midi_map,
+                learning: false,
+                learn_target: None,
+                tap_tempo_times: Vec::new(),
+            },
             preset_a: None,
             preset_b: None,
-            selected_rack_node: None,
-            rack_order: Vec::new(),
-            rack_plugin_editors: HashMap::new(),
-            inline_rack_plugin_gui: settings.inline_rack_plugin_gui,
-            inline_rack_editor_node: None,
             show_about: false,
             status_message: initial_status,
             show_preferences: false,
@@ -255,11 +280,6 @@ impl ToneDockApp {
             main_hwnd: None,
             settings,
             settings_dirty: false,
-            midi_input: MidiInput::new(),
-            midi_map,
-            midi_learning: false,
-            midi_learn_target: None,
-            tap_tempo_times: Vec::new(),
             fullscreen: false,
             practice_timer_start: None,
             last_dropout_count: 0,
@@ -268,8 +288,12 @@ impl ToneDockApp {
             scanning_in_progress: false,
         };
 
-        app.audio_engine.master_volume.store(app.master_volume.to_bits(), Ordering::Relaxed);
-        app.audio_engine.input_gain.store(app.input_gain.to_bits(), Ordering::Relaxed);
+        app.audio_engine
+            .master_volume
+            .store(app.master_volume.to_bits(), Ordering::Relaxed);
+        app.audio_engine
+            .input_gain
+            .store(app.input_gain.to_bits(), Ordering::Relaxed);
 
         app.scan_plugins();
         app.restore_audio_config();
@@ -284,7 +308,7 @@ impl ToneDockApp {
         if let Some(name) = device_name {
             let devices = crate::midi::MidiInput::enumerate_devices();
             if let Some(device) = devices.iter().find(|d| d.name == *name) {
-                if let Err(e) = self.midi_input.open_device(device.port_index) {
+                if let Err(e) = self.midi.input.open_device(device.port_index) {
                     log::warn!("Failed to restore MIDI device '{}': {}", name, e);
                 }
             }
@@ -327,9 +351,9 @@ impl ToneDockApp {
         self.settings.master_volume = self.master_volume;
         self.settings.input_gain = self.input_gain;
         self.settings.custom_plugin_paths = self.custom_plugin_paths.clone();
-        self.settings.inline_rack_plugin_gui = self.inline_rack_plugin_gui;
+        self.settings.inline_rack_plugin_gui = self.rack.inline_gui;
         self.settings.language = self.i18n.language();
-        self.settings.midi_map = self.midi_map.clone();
+        self.settings.midi_map = self.midi.map.clone();
         self.settings.disabled_plugin_paths = self.disabled_plugin_paths.clone();
         self.settings_dirty = true;
     }

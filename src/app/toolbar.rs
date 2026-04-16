@@ -1,4 +1,4 @@
-use eframe::App;
+﻿use eframe::App;
 use egui::*;
 use std::sync::atomic::Ordering;
 
@@ -238,7 +238,7 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                 }
 
                 if let Some(goal) = app.settings.bpm_goal {
-                    if goal > 0.0 && (app.metronome_bpm - goal).abs() < 0.5 {
+                    if goal > 0.0 && (app.transport.metronome_bpm - goal).abs() < 0.5 {
                         ui.label(
                             RichText::new(app.i18n.tr("toolbar.goal_reached"))
                                 .size(9.0)
@@ -275,12 +275,12 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
 
                 ui.separator();
 
-                if app.recorder_node_id.is_none() {
+                if app.transport.recorder_node_id.is_none() {
                     if crate::ui::controls::icon_btn(ui, "\u{25CF}+", app.i18n.tr("toolbar.add_recorder")).clicked() {
-                        app.recorder_node_id = Some(app.audio_engine.add_recorder_node());
+                        app.transport.recorder_node_id = Some(app.audio_engine.add_recorder_node());
                     }
                 } else {
-                    let is_recording = if let Some(id) = app.recorder_node_id {
+                    let is_recording = if let Some(id) = app.transport.recorder_node_id {
                         let guard = app.audio_engine.graph.load();
                         guard.get_node(id).map_or(false, |n| {
                             matches!(&n.internal_state, crate::audio::node::NodeInternalState::Recorder(s) if s.recording)
@@ -303,7 +303,7 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                         })
                         .clicked()
                     {
-                        if let Some(id) = app.recorder_node_id {
+                        if let Some(id) = app.transport.recorder_node_id {
                             if is_recording {
                                 app.audio_engine.stop_recorder(id);
                                 app.status_message = app.i18n.tr("status.recording_stopped").into();
@@ -314,7 +314,7 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                         }
                     }
                     if crate::ui::controls::icon_btn(ui, "\u{21E4}", app.i18n.tr("toolbar.export_rec")).clicked() {
-                        if let Some(id) = app.recorder_node_id {
+                        if let Some(id) = app.transport.recorder_node_id {
                             if let Some(path) = rfd::FileDialog::new()
                                 .add_filter("WAV".to_string(), &["wav"])
                                 .save_file()
@@ -354,10 +354,10 @@ fn draw_toolbar(app: &mut ToneDockApp, ctx: &Context) {
                     {
                         app.view_mode = match app.view_mode {
                             ViewMode::Rack => {
-                                if app.inline_rack_plugin_gui {
+                                if app.rack.inline_gui {
                                     app.close_all_rack_editors();
                                 }
-                                app.node_editor.set_selection(app.selected_rack_node);
+                                app.node_editor.set_selection(app.rack.selected_node);
                                 ViewMode::NodeEditor
                             }
                             ViewMode::NodeEditor => {
@@ -506,11 +506,11 @@ fn handle_shortcuts(app: &mut ToneDockApp, ctx: &Context) {
         }
     }
     if ctx.input(|i| i.key_pressed(egui::Key::M) && i.modifiers.ctrl) {
-        app.metronome_enabled = !app.metronome_enabled;
+        app.transport.metronome_enabled = !app.transport.metronome_enabled;
         app.sync_metronome_state();
     }
     if ctx.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.ctrl) {
-        if let Some(id) = app.recorder_node_id {
+        if let Some(id) = app.transport.recorder_node_id {
             let guard = app.audio_engine.graph.load();
             let is_recording = guard.get_node(id).map_or(false, |n| {
                 matches!(&n.internal_state, crate::audio::node::NodeInternalState::Recorder(s) if s.recording)
