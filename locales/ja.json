@@ -180,6 +180,7 @@
   "template.unknown": "不明なテンプレート: {name}",
 
   "prefs.title": "設定",
+  "prefs.general": "一般",
   "prefs.audio": "オーディオ",
   "prefs.plugins_vst": "プラグイン (VST)",
   "prefs.rack_gui_mode": "ラックGUIモード",

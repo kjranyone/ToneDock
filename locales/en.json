@@ -180,6 +180,7 @@
   "template.unknown": "Unknown template: {name}",
 
   "prefs.title": "Preferences",
+  "prefs.general": "General",
   "prefs.audio": "Audio",
   "prefs.plugins_vst": "Plugins (VST)",
   "prefs.rack_gui_mode": "RACK GUI MODE",

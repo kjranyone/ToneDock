@@ -11,6 +11,7 @@ pub use audio_tab::AudioSettingsState;
 pub use midi_tab::MidiTabState;
 
 pub enum PreferencesTab {
+    General,
     Audio,
     Plugins,
     Midi,
@@ -61,7 +62,7 @@ impl PreferencesState {
         inline_rack_plugin_gui: bool,
     ) -> Self {
         Self {
-            tab: PreferencesTab::Audio,
+            tab: PreferencesTab::General,
             audio: AudioSettingsState::new(
                 current_host,
                 current_sr,
@@ -120,10 +121,17 @@ pub fn show_preferences(
         .show(ctx, |ui| {
             preferences_panel_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    let general_selected = matches!(state.tab, PreferencesTab::General);
                     let audio_selected = matches!(state.tab, PreferencesTab::Audio);
                     let plugins_selected = matches!(state.tab, PreferencesTab::Plugins);
                     let midi_selected = matches!(state.tab, PreferencesTab::Midi);
 
+                    if ui
+                        .selectable_label(general_selected, i18n.tr("prefs.general"))
+                        .clicked()
+                    {
+                        state.tab = PreferencesTab::General;
+                    }
                     if ui
                         .selectable_label(audio_selected, i18n.tr("prefs.audio"))
                         .clicked()
@@ -147,30 +155,32 @@ pub fn show_preferences(
                 ui.separator();
                 ui.add_space(4.0);
 
-                ui.label(
-                    RichText::new(i18n.tr("prefs.language"))
-                        .size(SZ_SECTION)
-                        .color(crate::ui::theme::ACCENT),
-                );
-                ui.add_space(2.0);
-
-                let current_lang = i18n.language();
-                egui::ComboBox::from_id_salt("language_select")
-                    .selected_text(current_lang.display_name())
-                    .show_ui(ui, |ui| {
-                        for lang in Language::ALL {
-                            if ui
-                                .selectable_label(current_lang == lang, lang.display_name())
-                                .clicked()
-                            {
-                                result = PreferencesResult::SetLanguage(lang);
-                            }
-                        }
-                    });
-
-                ui.add_space(8.0);
-
                 match state.tab {
+                    PreferencesTab::General => {
+                        ui.label(
+                            RichText::new(i18n.tr("prefs.language"))
+                                .size(SZ_SECTION)
+                                .color(crate::ui::theme::ACCENT),
+                        );
+                        ui.add_space(2.0);
+
+                        let current_lang = i18n.language();
+                        egui::ComboBox::from_id_salt("language_select")
+                            .selected_text(current_lang.display_name())
+                            .show_ui(ui, |ui| {
+                                for lang in Language::ALL {
+                                    if ui
+                                        .selectable_label(
+                                            current_lang == lang,
+                                            lang.display_name(),
+                                        )
+                                        .clicked()
+                                    {
+                                        result = PreferencesResult::SetLanguage(lang);
+                                    }
+                                }
+                            });
+                    }
                     PreferencesTab::Audio => {
                         let audio_result = audio_tab::show_audio_tab(ui, &mut state.audio, i18n);
                         if matches!(result, PreferencesResult::None) {

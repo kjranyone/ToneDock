@@ -236,11 +236,10 @@ impl ToneDockApp {
                     .available_plugins
                     .iter()
                     .find(|info| info.path.to_string_lossy() == plugin_path.as_str());
-                let plugin_instance = node.plugin_instance.lock();
-                let has_editor = plugin_instance
-                    .as_ref()
-                    .map(|p| p.has_editor())
+                let has_editor = guard
+                    .with_plugin(*node_id, |p| p.has_editor())
                     .unwrap_or(false);
+                let plugin_loaded = guard.with_plugin(*node_id, |_| ()).is_some();
 
                 Some(RackSlotView {
                     node_id: *node_id,
@@ -251,7 +250,7 @@ impl ToneDockApp {
                     category: plugin_info
                         .map(|info| info.category.clone())
                         .unwrap_or_default(),
-                    loaded: plugin_instance.is_some(),
+                    loaded: plugin_loaded,
                     enabled: node.enabled,
                     bypassed: node.bypassed,
                     has_editor,

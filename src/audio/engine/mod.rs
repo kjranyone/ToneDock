@@ -267,6 +267,21 @@ impl AudioEngine {
         self.buffer_size = actual_buffer_size;
         {
             let guard = self.graph.load();
+            // Stream is stopped here (start() early-returns when already
+            // running; restart_with_config calls stop() first). No audio
+            // thread is active, so it is safe to touch the live plugins on
+            // the UI thread to reconfigure them for the new sample rate /
+            // buffer size. After publish, the audio thread migrates these
+            // plugins forward into the new graph on its first callback.
+            for node in guard.nodes_vec.iter() {
+                let mut plugin_instance = node.plugin_instance.lock();
+                if let Some(ref mut plugin) = *plugin_instance {
+                    plugin.setup_processing(
+                        actual_sample_rate,
+                        actual_buffer_size as i32,
+                    )?;
+                }
+            }
             let staging = (**guard).clone();
             drop(guard);
             commit_and_publish_graph(
@@ -354,6 +369,13 @@ impl AudioEngine {
             vec![0.0f32; actual_buffer_size as usize],
         ]));
 
+        // `last_graph` lives across callback invocations. When ArcSwap hands
+        // us a different Arc than last time, the UI (or a previous
+        // audio-thread commit) published a new graph — and this thread is the
+        // sole legal writer of `nodes_vec`'s UnsafeCell buffers, so we migrate
+        // plugin/buffer state forward here (not from the UI thread).
+        let mut last_graph: Option<Arc<AudioGraph>> = None;
+
         let out_stream = output_device.build_output_stream(
             &out_config,
             move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
@@ -362,6 +384,16 @@ impl AudioEngine {
                 let num_frames = data.len() / channels;
 
                 let gain = f32::from_bits(input_gain.load(Ordering::Relaxed));
+
+                {
+                    let cur = graph.load_full();
+                    if let Some(prev) = last_graph.as_ref() {
+                        if !Arc::ptr_eq(prev, &cur) {
+                            cur.migrate_runtime_state_from(prev);
+                        }
+                    }
+                    last_graph = Some(cur);
+                }
 
                 let mut input_vec = prealloc_input.lock();
                 input_vec[0].resize(num_frames, 0.0);
@@ -389,15 +421,20 @@ impl AudioEngine {
                     }
                     if !pending.is_empty() {
                         drop(input_vec);
-                        let guard = graph.load();
-                        let mut staging = (**guard).clone();
-                        drop(guard);
+                        let prev_arc = graph.load_full();
+                        let mut staging = (*prev_arc).clone();
                         for cmd in pending {
                             apply_command(&mut staging, cmd);
                         }
                         if let Err(e) = commit_and_publish_graph(&graph, staging, None) {
                             log::error!("Topology commit in audio thread failed: {}", e);
                         }
+                        // Migrate live state into the freshly-published graph
+                        // so the rest of this callback sees the same buffers
+                        // and plugins it was using a moment ago.
+                        let cur = graph.load_full();
+                        cur.migrate_runtime_state_from(&prev_arc);
+                        last_graph = Some(cur);
                         input_vec = prealloc_input.lock();
                         input_vec[0].resize(num_frames, 0.0);
                     }

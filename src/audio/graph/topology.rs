@@ -235,6 +235,19 @@ impl AudioGraph {
         }
     }
 
+    /// Rebuilds the runtime side-tables (`nodes_vec`, `compiled_connections_vec`,
+    /// `id_to_index`, `*_node_idx`) from the authoritative `nodes` HashMap and
+    /// `connections` list.
+    ///
+    /// After this returns, the audio thread reads exclusively from `nodes_vec`.
+    /// As a side effect, heavy per-node state — plugin instances, backing-track
+    /// / looper / recorder buffers, and atomic snapshots — is **moved** out of
+    /// `self.nodes` entries and into the fresh `self.nodes_vec` entries (see the
+    /// tail block of this function). Any read path that needs the live state
+    /// post-commit must use `get_node_runtime()` / `nodes_vec`, not
+    /// `get_node()` / `nodes`.
+    ///
+    /// No-op when `topology_dirty` is false.
     pub fn commit_topology(&mut self) -> Result<(), GraphError> {
         if !self.topology_dirty {
             return Ok(());
@@ -331,6 +344,67 @@ impl AudioGraph {
                 }
             }
         }
+
+        // GraphNode::clone intentionally clears heavy state (backing/looper/recorder
+        // buffers, plugin_instance) to avoid races during clone. The audio thread reads
+        // nodes_vec, so move whatever heavy state the UI just placed into self.nodes
+        // (e.g. a newly decoded backing track, or plugins instantiated from a preset)
+        // into the freshly-built nodes_vec entries. Atomic snapshots also need to be
+        // copied forward so UI accessors (which read nodes_vec via get_node_runtime)
+        // observe the latest values.
+        for (idx, &id) in self.process_order.iter().enumerate() {
+            let Some(src_node) = self.nodes.get(&id) else {
+                continue;
+            };
+            let dst_node = &self.nodes_vec[idx];
+
+            {
+                let plugin = src_node.plugin_instance.lock().take();
+                if plugin.is_some() {
+                    *dst_node.plugin_instance.lock() = plugin;
+                }
+            }
+
+            let sb = src_node.buffers_mut();
+            let db = dst_node.buffers_mut();
+
+            if let Some(buf) = sb.backing_track_buffer.take() {
+                db.backing_track_buffer = Some(buf);
+            }
+            if let Some(buf) = sb.looper_buffer.take() {
+                db.looper_buffer = Some(buf);
+            }
+            if let Some(buf) = sb.recorder_buffer.take() {
+                db.recorder_buffer = Some(buf);
+            }
+
+            db.metronome_phase = sb.metronome_phase;
+            db.metronome_click_remaining = sb.metronome_click_remaining;
+            db.backing_pre_roll_remaining = sb.backing_pre_roll_remaining;
+            db.drum_phase = sb.drum_phase;
+            db.drum_step = sb.drum_step;
+
+            use std::sync::atomic::Ordering;
+            dst_node.atomic_bt_position.store(
+                src_node.atomic_bt_position.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            dst_node.atomic_bt_duration.store(
+                src_node.atomic_bt_duration.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            for i in 0..dst_node.atomic_looper_lengths.len() {
+                dst_node.atomic_looper_lengths[i].store(
+                    src_node.atomic_looper_lengths[i].load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+            }
+            dst_node.atomic_recorder_has_data.store(
+                src_node.atomic_recorder_has_data.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
+
         self.topology_dirty = false;
         Ok(())
     }

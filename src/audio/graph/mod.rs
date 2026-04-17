@@ -299,8 +299,11 @@ pub struct GraphNode {
 // atomic fields (atomic_bt_position, atomic_bt_duration, atomic_looper_lengths, atomic_recorder_has_data)
 // which the audio thread updates after each process() call. The UI thread reads these atomics
 // instead of accessing ProcessBuffers directly.
-// Remaining known unsoundness: transfer_runtime_buffers() reads ProcessBuffers from the live graph
-// during graph rebuild. This is a brief "best effort" snapshot and does not affect display accuracy.
+//
+// Graph-change migration: when the UI publishes a new graph via ArcSwap, the audio thread detects
+// the change on its next callback and calls AudioGraph::migrate_runtime_state_from(prev) to move
+// plugin instances and heavy buffers forward. This runs single-threaded on the audio side, so the
+// UnsafeCell is still only written by one thread at a time.
 unsafe impl Sync for GraphNode {}
 unsafe impl Send for GraphNode {}
 
@@ -532,6 +535,13 @@ pub struct AudioGraph {
     pub(super) input_node_idx: Option<usize>,
     pub(super) output_node_idx: Option<usize>,
     pub(super) metronome_idx: Option<usize>,
+
+    /// When set, the audio thread skips the first runtime-state migration on
+    /// the callback that picks this graph up. Used by preset loads where the
+    /// new graph should start with fresh looper/backing-track/recorder state
+    /// rather than inheriting the previously-live graph's buffers. Consumed
+    /// (cleared) by the audio thread after one migration check.
+    pub(super) skip_runtime_migration: std::sync::atomic::AtomicBool,
 }
 
 impl Clone for AudioGraph {
@@ -545,7 +555,11 @@ impl Clone for AudioGraph {
             output_node_id: self.output_node_id,
             max_frames: self.max_frames,
             sample_rate: self.sample_rate,
-            topology_dirty: self.topology_dirty,
+            // Force topology rebuild after clone: the runtime side-tables below
+            // (nodes_vec, compiled_connections_vec, id_to_index, *_node_idx) are
+            // intentionally not cloned, so commit_topology() MUST run before the
+            // clone is published or the audio thread sees an empty graph.
+            topology_dirty: true,
             next_node_id: self.next_node_id,
             nodes_vec: Vec::new(),
             compiled_connections_vec: Vec::new(),
@@ -553,6 +567,9 @@ impl Clone for AudioGraph {
             input_node_idx: None,
             output_node_idx: None,
             metronome_idx: None,
+            // Default: migration is allowed. Preset load paths set this to
+            // true on the staging graph before publishing.
+            skip_runtime_migration: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -576,6 +593,7 @@ impl AudioGraph {
             input_node_idx: None,
             output_node_idx: None,
             metronome_idx: None,
+            skip_runtime_migration: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

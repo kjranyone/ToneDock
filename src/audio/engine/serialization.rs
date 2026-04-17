@@ -28,18 +28,17 @@ impl AudioEngine {
 
             let (parameters, plugin_state) = if matches!(node.node_type, NodeType::VstPlugin { .. })
             {
-                let plugin_instance = node.plugin_instance.lock();
-                if let Some(ref plugin) = *plugin_instance {
-                    let parameters = plugin
-                        .parameter_info()
-                        .iter()
-                        .enumerate()
-                        .map(|(index, _)| (index as u32, plugin.get_parameter(index)))
-                        .collect();
-                    (parameters, plugin.save_state())
-                } else {
-                    (Vec::new(), None)
-                }
+                guard
+                    .with_plugin(node_id, |plugin| {
+                        let parameters = plugin
+                            .parameter_info()
+                            .iter()
+                            .enumerate()
+                            .map(|(index, _)| (index as u32, plugin.get_parameter(index)))
+                            .collect();
+                        (parameters, plugin.save_state())
+                    })
+                    .unwrap_or_else(|| (Vec::new(), None))
             } else {
                 (Vec::new(), None)
             };
@@ -124,14 +123,9 @@ impl AudioEngine {
                 .map_err(|err| anyhow::anyhow!("Failed to connect {:?}: {}", conn, err))?;
         }
 
-        prepare_runtime_graph(
-            &mut new_graph,
-            Some((self.sample_rate, self.buffer_size as usize)),
-        );
-        new_graph
-            .commit_topology()
-            .map_err(|err| anyhow::anyhow!("Topology commit failed: {}", err))?;
-
+        // Instantiate and place plugins INTO new_graph.nodes BEFORE commit_topology;
+        // commit_topology will then move them into new_graph.nodes_vec where the
+        // audio thread reads them.
         for sn in &data.nodes {
             let NodeType::VstPlugin {
                 plugin_path,
@@ -169,14 +163,26 @@ impl AudioEngine {
             }
         }
 
+        prepare_runtime_graph(
+            &mut new_graph,
+            Some((self.sample_rate, self.buffer_size as usize)),
+        );
+        new_graph
+            .commit_topology()
+            .map_err(|err| anyhow::anyhow!("Topology commit failed: {}", err))?;
+
+        // Preset loads start the audio thread with a clean runtime state —
+        // no carryover of the previous graph's looper / backing track /
+        // recorder buffers. Flagging this on the staging graph makes the
+        // audio thread skip its next `migrate_runtime_state_from` call.
+        new_graph
+            .skip_runtime_migration
+            .store(true, std::sync::atomic::Ordering::Release);
+
         let metronome_node_id = Self::find_node_id_in_graph(&new_graph, NodeType::Metronome);
         let looper_node_id = Self::find_node_id_in_graph(&new_graph, NodeType::Looper);
         self.metronome_node_id = metronome_node_id;
         self.looper_node_id = looper_node_id;
-
-        let guard = self.graph.load();
-        super::helpers::transfer_runtime_buffers(&guard, &new_graph);
-        drop(guard);
 
         self.graph.store(Arc::new(new_graph));
         log::info!(
@@ -199,7 +205,7 @@ impl AudioEngine {
         // audio thread's perspective (it sees either old or new plugin, never both).
         {
             let guard = self.graph.load();
-            if let Some(node) = guard.get_node(node_id) {
+            if let Some(node) = guard.get_node_runtime(node_id) {
                 *node.plugin_instance.lock() = Some(plugin);
             } else {
                 return Err(anyhow::anyhow!("Node {:?} not found in graph", node_id));
@@ -221,7 +227,7 @@ impl AudioEngine {
 
     pub fn set_vst_node_parameter(&self, node_id: NodeId, param_index: usize, value: f32) {
         let guard = self.graph.load();
-        if let Some(node) = guard.get_node(node_id) {
+        if let Some(node) = guard.get_node_runtime(node_id) {
             let mut plugin_instance = node.plugin_instance.lock();
             if let Some(ref mut plugin) = *plugin_instance {
                 plugin.set_parameter(param_index, value);
@@ -231,7 +237,7 @@ impl AudioEngine {
 
     pub fn get_vst_node_parameters(&self, node_id: NodeId) -> Vec<crate::audio::chain::ParamInfo> {
         let guard = self.graph.load();
-        if let Some(node) = guard.get_node(node_id) {
+        if let Some(node) = guard.get_node_runtime(node_id) {
             let plugin_instance = node.plugin_instance.lock();
             if let Some(ref plugin) = *plugin_instance {
                 return plugin.parameter_info();
@@ -242,7 +248,7 @@ impl AudioEngine {
 
     pub fn get_vst_node_parameter_value(&self, node_id: NodeId, param_index: usize) -> f32 {
         let guard = self.graph.load();
-        if let Some(node) = guard.get_node(node_id) {
+        if let Some(node) = guard.get_node_runtime(node_id) {
             let plugin_instance = node.plugin_instance.lock();
             if let Some(ref plugin) = *plugin_instance {
                 return plugin.get_parameter(param_index);

@@ -38,6 +38,113 @@ impl AudioGraph {
         self.nodes.get_mut(&id)
     }
 
+    /// Returns the runtime/audio-thread view of a node. After commit_topology,
+    /// heavy state (backing track / looper / recorder buffers, plugin_instance,
+    /// and the live atomic counters) lives in `nodes_vec`, NOT in the `nodes`
+    /// HashMap. Use this accessor whenever you need to read the post-commit
+    /// state of a published graph.
+    pub fn get_node_runtime(&self, id: NodeId) -> Option<&GraphNode> {
+        let &idx = self.id_to_index.get(&id)?;
+        self.nodes_vec.get(idx)
+    }
+
+    /// Locks the runtime plugin instance for a node and invokes `f` with a
+    /// shared reference when a plugin is loaded. Returns `None` when the node
+    /// is missing or has no plugin. Prefer this over manually chaining
+    /// `get_node_runtime().plugin_instance.lock()` at call sites.
+    pub fn with_plugin<R>(
+        &self,
+        id: NodeId,
+        f: impl FnOnce(&crate::vst_host::plugin::LoadedPlugin) -> R,
+    ) -> Option<R> {
+        let node = self.get_node_runtime(id)?;
+        let guard = node.plugin_instance.lock();
+        guard.as_ref().map(f)
+    }
+
+    /// Moves heavy per-node runtime state (plugin instances, backing-track /
+    /// looper / recorder buffers, and live atomics) from `prev`'s runtime view
+    /// into this graph's runtime view.
+    ///
+    /// Safety/threading: This MUST only be called from the audio thread after
+    /// it observes a graph change via `ArcSwap`. The audio thread is the sole
+    /// reader/writer of `nodes_vec.*.buffers` (an `UnsafeCell`), so mutating
+    /// both sides from a single thread avoids the data race that a UI-thread
+    /// `transfer_runtime_*` would introduce.
+    ///
+    /// Skips the migration (and clears the flag) when `self.skip_runtime_migration`
+    /// is set — used by preset loads that want the new graph to start with a
+    /// clean runtime state.
+    ///
+    /// Policy: only migrates a slot when the destination is empty, so a freshly
+    /// staged buffer (e.g. a newly loaded backing track) wins over the legacy
+    /// buffer carried from the previous graph.
+    pub fn migrate_runtime_state_from(&self, prev: &AudioGraph) {
+        use std::sync::atomic::Ordering;
+
+        if self
+            .skip_runtime_migration
+            .swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+
+        for node in &self.nodes_vec {
+            let Some(&prev_idx) = prev.id_to_index.get(&node.id) else {
+                continue;
+            };
+            let Some(prev_node) = prev.nodes_vec.get(prev_idx) else {
+                continue;
+            };
+            if node.node_type != prev_node.node_type {
+                continue;
+            }
+
+            {
+                let mut dst = node.plugin_instance.lock();
+                if dst.is_none() {
+                    *dst = prev_node.plugin_instance.lock().take();
+                }
+            }
+
+            let db = node.buffers_mut();
+            let sb = prev_node.buffers_mut();
+            if db.backing_track_buffer.is_none() {
+                db.backing_track_buffer = sb.backing_track_buffer.take();
+            }
+            if db.looper_buffer.is_none() {
+                db.looper_buffer = sb.looper_buffer.take();
+            }
+            if db.recorder_buffer.is_none() {
+                db.recorder_buffer = sb.recorder_buffer.take();
+            }
+            db.metronome_phase = sb.metronome_phase;
+            db.metronome_click_remaining = sb.metronome_click_remaining;
+            db.backing_pre_roll_remaining = sb.backing_pre_roll_remaining;
+            db.drum_phase = sb.drum_phase;
+            db.drum_step = sb.drum_step;
+
+            node.atomic_bt_position.store(
+                prev_node.atomic_bt_position.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            node.atomic_bt_duration.store(
+                prev_node.atomic_bt_duration.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            for i in 0..node.atomic_looper_lengths.len() {
+                node.atomic_looper_lengths[i].store(
+                    prev_node.atomic_looper_lengths[i].load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+            }
+            node.atomic_recorder_has_data.store(
+                prev_node.atomic_recorder_has_data.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
+    }
+
     #[allow(dead_code)]
     pub fn input_node_id(&self) -> Option<NodeId> {
         self.input_node_id
@@ -80,15 +187,16 @@ impl AudioGraph {
     }
 
     pub fn looper_loop_length(&self, node_id: NodeId) -> usize {
-        let node = match self.nodes.get(&node_id) {
-            Some(n) => n,
-            None => return 0,
-        };
-        let active_track = match &node.internal_state {
-            NodeInternalState::Looper(s) => s.active_track as usize,
+        // Read the live length from the runtime node (audio thread writes here).
+        let runtime = self.get_node_runtime(node_id);
+        let active_track = match runtime.map(|n| &n.internal_state) {
+            Some(NodeInternalState::Looper(s)) => s.active_track as usize,
             _ => 0,
         };
-        node.atomic_looper_lengths[active_track].load(Ordering::Relaxed)
+        match runtime {
+            Some(n) => n.atomic_looper_lengths[active_track].load(Ordering::Relaxed),
+            None => 0,
+        }
     }
 
     pub fn clear_looper(&mut self, node_id: NodeId) {
@@ -144,21 +252,26 @@ impl AudioGraph {
     }
 
     pub fn backing_track_duration_secs(&self, node_id: NodeId) -> f64 {
-        let Some(node) = self.nodes.get(&node_id) else {
+        let Some(node) = self.get_node_runtime(node_id) else {
             return 0.0;
         };
         f64::from_bits(node.atomic_bt_duration.load(Ordering::Relaxed))
     }
 
     pub fn backing_track_position_secs(&self, node_id: NodeId) -> f64 {
-        let Some(node) = self.nodes.get(&node_id) else {
+        let Some(node) = self.get_node_runtime(node_id) else {
             return 0.0;
         };
         f64::from_bits(node.atomic_bt_position.load(Ordering::Relaxed))
     }
 
     pub fn backing_track_seek(&self, node_id: NodeId, position_secs: f64) {
-        let Some(node) = self.nodes.get(&node_id) else {
+        // Seek targets the runtime buffer the audio thread is reading.
+        // Falls back to the staging HashMap entry when called pre-commit.
+        let node = self
+            .get_node_runtime(node_id)
+            .or_else(|| self.nodes.get(&node_id));
+        let Some(node) = node else {
             return;
         };
         let b = node.buffers_mut();

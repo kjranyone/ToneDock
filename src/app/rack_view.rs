@@ -24,11 +24,9 @@ impl ToneDockApp {
                 NodeType::VstPlugin { plugin_name, .. } => plugin_name.clone(),
                 _ => return,
             };
-            let edit_controller = node
-                .plugin_instance
-                .lock()
-                .as_ref()
-                .and_then(|plugin| plugin.edit_controller().cloned());
+            let edit_controller = guard
+                .with_plugin(node_id, |plugin| plugin.edit_controller().cloned())
+                .flatten();
             (edit_controller, plugin_name)
         };
 
@@ -76,11 +74,9 @@ impl ToneDockApp {
                 NodeType::VstPlugin { plugin_name, .. } => plugin_name.clone(),
                 _ => return,
             };
-            let edit_controller = node
-                .plugin_instance
-                .lock()
-                .as_ref()
-                .and_then(|plugin| plugin.edit_controller().cloned());
+            let edit_controller = guard
+                .with_plugin(node_id, |plugin| plugin.edit_controller().cloned())
+                .flatten();
             (edit_controller, plugin_name)
         };
 
@@ -506,10 +502,7 @@ impl ToneDockApp {
 
         let has_plugin = {
             let guard = self.audio_engine.graph.load();
-            guard
-                .get_node(node_id)
-                .map(|n| n.plugin_instance.lock().is_some())
-                .unwrap_or(false)
+            guard.with_plugin(node_id, |_| ()).is_some()
         };
 
         if !has_plugin {

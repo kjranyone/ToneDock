@@ -1,4 +1,3 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -76,82 +75,20 @@ pub(super) fn prepare_runtime_graph(
     }
 }
 
-fn transfer_runtime_plugins(
-    current: &AudioGraph,
-    staging: &mut AudioGraph,
-    runtime_config: Option<(f64, usize)>,
-) -> anyhow::Result<()> {
-    if let Some((sample_rate, max_frames)) = runtime_config {
-        for node in current.nodes().values() {
-            let mut plugin_instance = node.plugin_instance.lock();
-            if let Some(ref mut plugin) = *plugin_instance {
-                plugin.setup_processing(sample_rate, max_frames as i32)?;
-            }
-        }
-    }
-
-    for (&id, source_node) in current.nodes() {
-        let Some(target_node) = staging.get_node(id) else {
-            continue;
-        };
-
-        let maybe_plugin = source_node.plugin_instance.lock().take();
-        if let Some(plugin) = maybe_plugin {
-            *target_node.plugin_instance.lock() = Some(plugin);
-        }
-    }
-
-    Ok(())
-}
-
-pub(super) fn transfer_runtime_buffers(current: &AudioGraph, staging: &AudioGraph) {
-    for (&id, source_node) in current.nodes() {
-        let Some(target_node) = staging.get_node(id) else {
-            continue;
-        };
-
-        if source_node.node_type != target_node.node_type {
-            continue;
-        }
-
-        let sb = source_node.buffers();
-        let tb = target_node.buffers_mut();
-
-        if sb.looper_buffer.is_some() {
-            tb.looper_buffer = sb.looper_buffer.clone();
-        }
-        if sb.backing_track_buffer.is_some() {
-            tb.backing_track_buffer = sb.backing_track_buffer.clone();
-        }
-        if sb.recorder_buffer.is_some() {
-            tb.recorder_buffer = sb.recorder_buffer.clone();
-        }
-
-        tb.metronome_phase = sb.metronome_phase;
-        tb.metronome_click_remaining = sb.metronome_click_remaining;
-        tb.backing_pre_roll_remaining = sb.backing_pre_roll_remaining;
-        tb.drum_phase = sb.drum_phase;
-        tb.drum_step = sb.drum_step;
-
-        target_node.atomic_bt_position.store(
-            source_node.atomic_bt_position.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-        target_node.atomic_bt_duration.store(
-            source_node.atomic_bt_duration.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-        for (i, len) in source_node.atomic_looper_lengths.iter().enumerate() {
-            target_node.atomic_looper_lengths[i]
-                .store(len.load(Ordering::Relaxed), Ordering::Relaxed);
-        }
-        target_node.atomic_recorder_has_data.store(
-            source_node.atomic_recorder_has_data.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-    }
-}
-
+/// Finalizes `staging` and publishes it as the new live graph.
+///
+/// Intentionally does NOT copy plugin/buffer state from the currently-live
+/// graph into `staging`: doing so from a non-audio thread would race with the
+/// audio thread's UnsafeCell access on the live graph. Instead, the audio
+/// thread observes the publish via `ArcSwap`, holds on to the previous Arc,
+/// and calls `AudioGraph::migrate_runtime_state_from(prev)` on the new graph
+/// from within its own callback (single-threaded, so no race).
+///
+/// Heavy state the caller DID put into `staging.nodes` (e.g. a freshly
+/// decoded backing track buffer, or plugins just instantiated by the
+/// serialization path) is preserved by `commit_topology()`, which moves
+/// `staging.nodes` heavy state into `staging.nodes_vec`. The migration
+/// policy then refuses to overwrite those slots.
 pub(super) fn commit_and_publish_graph(
     graph: &Arc<ArcSwap<AudioGraph>>,
     mut staging: AudioGraph,
@@ -161,11 +98,6 @@ pub(super) fn commit_and_publish_graph(
     staging
         .commit_topology()
         .map_err(|e| anyhow::anyhow!("Topology commit failed: {}", e))?;
-
-    let guard = graph.load();
-    transfer_runtime_buffers(&guard, &staging);
-    transfer_runtime_plugins(&guard, &mut staging, runtime_config)?;
-    drop(guard);
     graph.store(Arc::new(staging));
     Ok(())
 }

@@ -175,13 +175,27 @@ fn append_decoded_samples(
 impl AudioEngine {
     pub fn load_backing_track_file(&self, node_id: NodeId, path: &Path) -> anyhow::Result<()> {
         let (channel_data, file_sample_rate) = decode_audio_file(path)?;
+        let frames = channel_data.first().map(|c| c.len()).unwrap_or(0);
+        let channels = channel_data.len();
+        log::info!(
+            "Loaded backing track: {:?} ({} ch x {} frames @ {} Hz)",
+            path,
+            channels,
+            frames,
+            file_sample_rate
+        );
+
         let sample_rate = self.sample_rate;
         let resampled = if (file_sample_rate - sample_rate).abs() > 1.0 {
+            log::debug!(
+                "load_backing_track: resampling {} -> {} Hz",
+                file_sample_rate,
+                sample_rate
+            );
             resample(&channel_data, file_sample_rate, sample_rate)
         } else {
             channel_data
         };
-
         let buffer = BackingTrackBuffer::new(resampled, sample_rate);
 
         {
@@ -374,17 +388,16 @@ impl AudioEngine {
 
     pub fn stop_recorder(&self, node_id: NodeId) {
         let guard = self.graph.load();
+        // Read the recorded data from the runtime view — the audio thread
+        // writes recorder_buffer there.
+        let has_data = guard.get_node_runtime(node_id).map_or(false, |n| {
+            n.buffers().recorder_buffer.as_ref().map_or(false, |b| {
+                b.iter().any(|c: &Vec<f32>| !c.is_empty())
+            })
+        });
         let mut staging = (**guard).clone();
         drop(guard);
         if let Some(node) = staging.get_node_mut(node_id) {
-            let has_data = node
-                .buffers
-                .get_mut()
-                .recorder_buffer
-                .as_ref()
-                .map_or(false, |b: &Vec<Vec<f32>>| {
-                    b.iter().any(|c: &Vec<f32>| !c.is_empty())
-                });
             node.internal_state =
                 NodeInternalState::Recorder(crate::audio::node::RecorderNodeState {
                     recording: false,
@@ -400,7 +413,7 @@ impl AudioEngine {
         path: &std::path::Path,
     ) -> anyhow::Result<()> {
         let guard = self.graph.load();
-        let Some(node) = guard.get_node(node_id) else {
+        let Some(node) = guard.get_node_runtime(node_id) else {
             return Err(anyhow::anyhow!("Recorder node not found"));
         };
         let buf = node.buffers();
@@ -437,7 +450,7 @@ impl AudioEngine {
     #[allow(dead_code)]
     pub fn recorder_has_data(&self, node_id: NodeId) -> bool {
         let guard = self.graph.load();
-        guard.get_node(node_id).map_or(false, |node| {
+        guard.get_node_runtime(node_id).map_or(false, |node| {
             node.atomic_recorder_has_data.load(Ordering::Relaxed)
         })
     }

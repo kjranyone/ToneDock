@@ -908,3 +908,146 @@ fn test_undo_remove_node_restore() {
         );
     }
 }
+
+#[test]
+fn test_commit_topology_moves_backing_track_buffer_to_nodes_vec() {
+    // Regression: load_backing_track_file writes the buffer into nodes (HashMap),
+    // but the audio thread reads nodes_vec. commit_topology must move the buffer
+    // forward so the audio thread can play it.
+    let mut graph = AudioGraph::new(48000.0, 4);
+    let input_id = graph.add_node(NodeType::AudioInput).unwrap();
+    let bt_id = graph.add_node(NodeType::BackingTrack).unwrap();
+    let mixer_id = graph
+        .add_node(NodeType::Mixer { inputs: 2 })
+        .unwrap();
+    let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
+
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: mixer_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: bt_id,
+            source_port: PortId(0),
+            target_node: mixer_id,
+            target_port: PortId(1),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: mixer_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+
+    // Put a 4-frame buffer with all 0.25 samples into the BackingTrack node.
+    let buffer = super::BackingTrackBuffer::new(vec![vec![0.25; 4], vec![0.25; 4]], 48000.0);
+    graph.set_backing_track_buffer(bt_id, buffer);
+
+    // Mark the node as playing so the processor will read the buffer.
+    graph.set_node_internal_state(
+        bt_id,
+        NodeInternalState::BackingTrack(crate::audio::node::BackingTrackNodeState {
+            playing: true,
+            volume: 1.0,
+            speed: 1.0,
+            looping: false,
+            file_loaded: true,
+            loop_start: None,
+            loop_end: None,
+            pitch_semitones: 0.0,
+            pre_roll_secs: 0.0,
+            section_markers: vec![],
+        }),
+    );
+
+    graph.commit_topology().unwrap();
+
+    // The buffer must now live in the runtime node, not the HashMap entry.
+    let runtime = graph.get_node_runtime(bt_id).expect("runtime node");
+    let runtime_buf = &runtime.buffers().backing_track_buffer;
+    assert!(runtime_buf.is_some(), "runtime nodes_vec must own the buffer");
+    assert_eq!(runtime_buf.as_ref().unwrap().total_frames, 4);
+
+    let hashmap_buf = &graph.get_node(bt_id).unwrap().buffers().backing_track_buffer;
+    assert!(
+        hashmap_buf.is_none(),
+        "buffer must be moved out of the HashMap entry"
+    );
+
+    // Process: the audio output should reflect the backing track samples.
+    let input = vec![vec![0.0f32; 4]];
+    let output = graph.process(&input, 4);
+    for (i, sample) in output[0].iter().enumerate().take(4) {
+        assert!(
+            (sample - 0.25).abs() < 1e-3,
+            "frame {} should play backing track sample 0.25, got {}",
+            i,
+            sample
+        );
+    }
+}
+
+#[test]
+fn test_clone_then_commit_rebuilds_runtime_tables() {
+    // Regression: cloning an already-committed graph used to preserve
+    // topology_dirty=false, so a follow-up commit_topology() returned early
+    // without populating nodes_vec/compiled_connections_vec/*_node_idx.
+    // The published clone then made the audio thread silent (and racy on
+    // any code path that publishes without first applying a topology
+    // command — e.g. load_backing_track_file, backing_track_seek, etc.).
+    let mut graph = AudioGraph::new(48000.0, 256);
+    let input_id = graph.add_node(NodeType::AudioInput).unwrap();
+    let gain_id = graph.add_node(NodeType::Gain).unwrap();
+    let output_id = graph.add_node(NodeType::AudioOutput).unwrap();
+    graph
+        .connect(Connection {
+            source_node: input_id,
+            source_port: PortId(0),
+            target_node: gain_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph
+        .connect(Connection {
+            source_node: gain_id,
+            source_port: PortId(0),
+            target_node: output_id,
+            target_port: PortId(0),
+        })
+        .unwrap();
+    graph.commit_topology().unwrap();
+    assert_eq!(graph.nodes_vec.len(), 3, "sanity: source has 3 nodes");
+
+    let mut staging = graph.clone();
+    assert!(
+        staging.topology_dirty,
+        "clone must mark topology dirty so commit_topology rebuilds runtime tables"
+    );
+    assert!(staging.nodes_vec.is_empty(), "clone must start with empty runtime tables");
+
+    staging.commit_topology().unwrap();
+    assert_eq!(
+        staging.nodes_vec.len(),
+        3,
+        "commit_topology after clone must repopulate nodes_vec"
+    );
+    assert!(staging.input_node_idx.is_some());
+    assert!(staging.output_node_idx.is_some());
+    assert_eq!(staging.compiled_connections_vec.len(), 3);
+
+    let input = vec![vec![0.5f32; 256]];
+    let output = staging.process(&input, 256);
+    assert!(
+        (output[0][0] - 0.5).abs() < 1e-6,
+        "cloned+committed graph must process audio (got {})",
+        output[0][0]
+    );
+}
